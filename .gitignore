@@ -1,0 +1,12 @@
+.DS_Store
+.idea/
+__pycache__/
+*.pyc
+*.csv
+*.egg-info/
+
+input/*
+!input/.gitkeep
+
+output/*.csv
+!output/.gitkeep
