@@ -76,6 +76,7 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(repaired["symbol"], "UBER 80 Call")
         self.assertEqual(repaired["instrument_type"], "option")
         self.assertEqual(repaired["expiration"], "Jun 18 2026")
+        self.assertEqual(repaired["description"], "")
         self.assertEqual(repaired["quantity"], "-18")
         self.assertEqual(repaired["change"], "+$1.96")
         self.assertEqual(repaired["day_range_low"], "2.62")
@@ -113,6 +114,7 @@ class SampleImageExtractionTests(unittest.TestCase):
         self.assertEqual(by_key[("ORCL", "")]["week_52_low"], "121.24")
         self.assertEqual(by_key[("TSLA", "")]["week_52_low"], "222.79")
         self.assertEqual(by_key[("GOOGL 325 Put", "Apr 17 2026")]["day_range_low"], "0.29")
+        self.assertEqual(by_key[("UBER 80 Call", "Jun 18 2026")]["description"], "")
 
     def test_timestamp_only_output_filename(self) -> None:
         created_at = extractor.datetime.fromisoformat("2026-04-15T14:31:16-07:00")

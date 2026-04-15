@@ -598,7 +598,9 @@ def repair_record_from_crop_texts(
         repaired["symbol"] = symbol
     if instrument_type:
         repaired["instrument_type"] = instrument_type
-    if description or repaired["instrument_type"] == "equity":
+    if repaired["instrument_type"] == "option":
+        repaired["description"] = ""
+    elif description or repaired["instrument_type"] == "equity":
         repaired["description"] = description
     if expiration or repaired["instrument_type"] == "option":
         repaired["expiration"] = expiration
