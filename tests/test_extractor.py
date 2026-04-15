@@ -5,6 +5,10 @@ import unittest
 import extract as extractor
 
 
+def sample_created_at() -> extractor.datetime:
+    return extractor.datetime.fromisoformat("2026-04-15T14:31:16-07:00")
+
+
 class ExtractorHelperTests(unittest.TestCase):
     def test_quantity_normalization_strips_margin_glyph_noise(self) -> None:
         self.assertEqual(extractor.extract_best_field_value("quantity", ["-4 M"]), "-4")
@@ -117,9 +121,8 @@ class SampleImageExtractionTests(unittest.TestCase):
         self.assertEqual(by_key[("UBER 80 Call", "Jun 18 2026")]["description"], "")
 
     def test_timestamp_only_output_filename(self) -> None:
-        created_at = extractor.datetime.fromisoformat("2026-04-15T14:31:16-07:00")
         self.assertEqual(
-            extractor.csv_name(created_at),
+            extractor.csv_name(sample_created_at()),
             "positions_monitoring_20260415T143116-0700.csv",
         )
 
@@ -128,7 +131,7 @@ class SampleImageExtractionTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             output_dir = temp_path / "output"
             output_dir.mkdir()
-            csv_path = output_dir / "positions_monitoring_20260415T143116-0700.csv"
+            csv_path = output_dir / extractor.csv_name(sample_created_at())
             csv_path.write_text(
                 "schema_name,image_file,created_at,symbol,instrument_type,description,expiration,last,change,percent_change,bid,ask,volume,day_range_low,day_range_high,week_52_low,week_52_high,avg_cost,quantity,total_gl,percent_total_gl\n"
                 "monitoring,other.png,2026-04-15T14:31:16-07:00,FBTC,equity,,,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n",
@@ -140,9 +143,7 @@ class SampleImageExtractionTests(unittest.TestCase):
             original_output_dir = extractor.OUTPUT_DIR
             original_image_created_at = extractor.image_created_at
             extractor.OUTPUT_DIR = output_dir
-            extractor.image_created_at = lambda _: extractor.datetime.fromisoformat(
-                "2026-04-15T14:31:16-07:00"
-            )
+            extractor.image_created_at = lambda _: sample_created_at()
             try:
                 with self.assertRaises(FileExistsError):
                     extractor.process_image(image_path)

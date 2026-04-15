@@ -6,11 +6,15 @@ from pathlib import Path
 import viewer
 
 
+def sample_created_at_iso() -> str:
+    return "2026-04-15T14:31:16-07:00"
+
+
 class ViewerHelperTests(unittest.TestCase):
     def test_format_timestamp_from_name_uses_timestamp_only_pattern(self) -> None:
         self.assertEqual(
             viewer.format_timestamp_from_name("positions_monitoring_20260415T143116-0700.csv"),
-            "2026-04-15T14:31:16-07:00",
+            sample_created_at_iso(),
         )
 
     def test_build_data_payload_uses_created_at_field(self) -> None:
@@ -49,7 +53,7 @@ class ViewerHelperTests(unittest.TestCase):
                     {
                         "schema_name": "monitoring",
                         "image_file": "sample.png",
-                        "created_at": "2026-04-15T14:31:16-07:00",
+                        "created_at": sample_created_at_iso(),
                         "symbol": "FBTC",
                         "instrument_type": "equity",
                         "description": "FUND",
@@ -80,9 +84,9 @@ class ViewerHelperTests(unittest.TestCase):
 
             self.assertEqual(
                 payload["freshness_summary"]["source_created_at"],
-                "2026-04-15T14:31:16-07:00",
+                sample_created_at_iso(),
             )
-            self.assertEqual(payload["display_name"], "2026-04-15T14:31:16-07:00")
+            self.assertEqual(payload["display_name"], sample_created_at_iso())
 
 
 if __name__ == "__main__":
