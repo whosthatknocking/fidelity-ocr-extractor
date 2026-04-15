@@ -784,15 +784,19 @@ def main(argv: list[str] | None = None) -> int:
     extracted = 0
     skipped = 0
     for image_path in images:
+        print(f"processing {image_path.name}...", flush=True)
         status, destination = process_image(image_path)
         if status == "extracted":
             extracted += 1
-            print(f"extracted {image_path.name} -> {destination.name}")
+            print(f"extracted {image_path.name} -> {destination.name}", flush=True)
         else:
             skipped += 1
-            print(f"skipped   {image_path.name} -> {destination.name}")
+            print(f"skipped   {image_path.name} -> {destination.name}", flush=True)
 
-    print(f"processed {len(images)} input file(s): {extracted} extracted, {skipped} skipped")
+    print(
+        f"processed {len(images)} input file(s): {extracted} extracted, {skipped} skipped",
+        flush=True,
+    )
     return 0
 
 
