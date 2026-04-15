@@ -21,6 +21,15 @@ class ExtractorHelperTests(unittest.TestCase):
             "28.00",
         )
 
+    def test_percent_normalization_repairs_missing_decimal_and_sign(self) -> None:
+        self.assertEqual(extractor.normalize_percent_text("+599%"), "+5.99%")
+        self.assertEqual(extractor.normalize_percent_text("+179 94%"), "+179.94%")
+        self.assertEqual(extractor.normalize_percent_text("-1,90%"), "-1.90%")
+        self.assertEqual(
+            extractor.normalize_percent_text("22.12%", paired_amount="-$20,189.95"),
+            "-22.12%",
+        )
+
     def test_repair_record_from_crop_texts_updates_symbol_and_missing_fields(self) -> None:
         record = {
             "schema_name": "monitoring",
@@ -86,6 +95,11 @@ class SampleImageExtractionTests(unittest.TestCase):
         self.assertEqual(by_key[("MSFT 420 Call", "Aug 21 2026")]["percent_change"], "+0.44%")
         self.assertEqual(by_key[("PLTR 150 Call", "Jun 18 2026")]["day_range_high"], "10.31")
         self.assertEqual(by_key[("PLTR 150 Call", "Jun 18 2026")]["week_52_low"], "4.40")
+        self.assertEqual(by_key[("UBER", "")]["percent_change"], "+5.99%")
+        self.assertEqual(by_key[("UBER", "")]["percent_total_gl"], "+179.94%")
+        self.assertEqual(by_key[("TSLA", "")]["percent_change"], "+7.62%")
+        self.assertEqual(by_key[("TSLA", "")]["percent_total_gl"], "-1.90%")
+        self.assertEqual(by_key[("PLTR", "")]["percent_total_gl"], "-22.12%")
 
     def test_timestamp_only_output_filename(self) -> None:
         created_at = extractor.datetime.fromisoformat("2026-04-15T14:31:16-07:00")

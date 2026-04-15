@@ -327,6 +327,41 @@ def normalize_description(text: str) -> str:
     return clean_text(text).replace("...", "").strip()
 
 
+def normalize_percent_text(text: str, *, paired_amount: str = "") -> str:
+    cleaned = clean_text(text).replace("/", "").replace(" ", "")
+    if not cleaned:
+        return ""
+    if not cleaned.endswith("%"):
+        return cleaned
+
+    sign = ""
+    if cleaned[0] in "+-":
+        sign = cleaned[0]
+        cleaned = cleaned[1:]
+    elif paired_amount.startswith("-"):
+        sign = "-"
+    elif paired_amount.startswith("+"):
+        sign = "+"
+
+    number_text = cleaned[:-1].replace(",", ".")
+    if number_text.count(".") > 1:
+        head, *tail = number_text.split(".")
+        number_text = head + "." + "".join(tail)
+
+    if "." not in number_text:
+        digits = re.sub(r"[^0-9]", "", number_text)
+        if len(digits) >= 3:
+            number_text = f"{digits[:-2]}.{digits[-2:]}"
+        else:
+            number_text = digits
+    else:
+        number_text = re.sub(r"[^0-9.]", "", number_text)
+
+    if not number_text:
+        return ""
+    return f"{sign}{number_text}%"
+
+
 def looks_like_expiration(text: str) -> bool:
     return bool(
         re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", clean_text(text))
@@ -380,6 +415,12 @@ def parse_main_row(row: list[OcrItem]) -> dict[str, str]:
         parsed["total_gl"] = f"-{total_gl.lstrip('-')}"
     if total_gl and not total_gl.startswith(("+", "-")) and percent_total_gl.startswith("+"):
         parsed["total_gl"] = f"+{total_gl.lstrip('+')}"
+
+    parsed["percent_change"] = normalize_percent_text(parsed.get("percent_change", ""))
+    parsed["percent_total_gl"] = normalize_percent_text(
+        parsed.get("percent_total_gl", ""),
+        paired_amount=parsed.get("total_gl", ""),
+    )
 
     return parsed
 
@@ -531,6 +572,12 @@ def repair_record_from_crop_texts(
         candidate = extract_best_field_value(field_name, texts)
         if candidate:
             repaired[field_name] = candidate
+
+    repaired["percent_change"] = normalize_percent_text(repaired.get("percent_change", ""))
+    repaired["percent_total_gl"] = normalize_percent_text(
+        repaired.get("percent_total_gl", ""),
+        paired_amount=repaired.get("total_gl", ""),
+    )
 
     return repaired
 
