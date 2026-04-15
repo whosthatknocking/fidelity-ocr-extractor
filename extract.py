@@ -362,6 +362,46 @@ def normalize_percent_text(text: str, *, paired_amount: str = "") -> str:
     return f"{sign}{number_text}%"
 
 
+def normalize_range_text(text: str) -> str:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return ""
+
+    cleaned = cleaned.replace("*", "").replace(" ", "").replace(",", ".")
+    cleaned = re.sub(r"(?<=\d)[Aa](?=\d|$)", "4", cleaned)
+    cleaned = re.sub(r"(?<=\.)[Aa](?=\d|$)", "4", cleaned)
+    cleaned = re.sub(r"[^0-9.]", "", cleaned)
+    if not cleaned:
+        return ""
+
+    if cleaned.startswith("."):
+        cleaned = f"0{cleaned}"
+
+    if cleaned.count(".") > 1:
+        head, *tail = cleaned.split(".")
+        cleaned = head + "." + "".join(tail)
+
+    if "." not in cleaned:
+        digits = cleaned
+        if len(digits) >= 3:
+            cleaned = f"{digits[:-2]}.{digits[-2:]}"
+        else:
+            cleaned = digits
+
+    if "." in cleaned:
+        whole, frac = cleaned.split(".", 1)
+        frac = re.sub(r"[^0-9]", "", frac)
+        if not whole:
+            whole = "0"
+        if not frac:
+            return whole
+        if len(frac) == 1:
+            frac = f"{frac}0"
+        return f"{whole}.{frac}"
+
+    return cleaned
+
+
 def looks_like_expiration(text: str) -> bool:
     return bool(
         re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", clean_text(text))
@@ -421,6 +461,8 @@ def parse_main_row(row: list[OcrItem]) -> dict[str, str]:
         parsed.get("percent_total_gl", ""),
         paired_amount=parsed.get("total_gl", ""),
     )
+    for field_name in ("day_range_low", "day_range_high", "week_52_low", "week_52_high"):
+        parsed[field_name] = normalize_range_text(parsed.get(field_name, ""))
 
     return parsed
 
@@ -578,6 +620,8 @@ def repair_record_from_crop_texts(
         repaired.get("percent_total_gl", ""),
         paired_amount=repaired.get("total_gl", ""),
     )
+    for field_name in ("day_range_low", "day_range_high", "week_52_low", "week_52_high"):
+        repaired[field_name] = normalize_range_text(repaired.get(field_name, ""))
 
     return repaired
 

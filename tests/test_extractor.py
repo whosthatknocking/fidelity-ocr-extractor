@@ -30,6 +30,14 @@ class ExtractorHelperTests(unittest.TestCase):
             "-22.12%",
         )
 
+    def test_range_normalization_repairs_missing_decimal_and_ocr_noise(self) -> None:
+        self.assertEqual(extractor.normalize_range_text("6846"), "68.46")
+        self.assertEqual(extractor.normalize_range_text("12124"), "121.24")
+        self.assertEqual(extractor.normalize_range_text("222 79"), "222.79")
+        self.assertEqual(extractor.normalize_range_text("029"), "0.29")
+        self.assertEqual(extractor.normalize_range_text("*.5A"), "0.54")
+        self.assertEqual(extractor.normalize_range_text("725"), "7.25")
+
     def test_repair_record_from_crop_texts_updates_symbol_and_missing_fields(self) -> None:
         record = {
             "schema_name": "monitoring",
@@ -100,6 +108,11 @@ class SampleImageExtractionTests(unittest.TestCase):
         self.assertEqual(by_key[("TSLA", "")]["percent_change"], "+7.62%")
         self.assertEqual(by_key[("TSLA", "")]["percent_total_gl"], "-1.90%")
         self.assertEqual(by_key[("PLTR", "")]["percent_total_gl"], "-22.12%")
+        self.assertEqual(by_key[("UBER", "")]["week_52_low"], "68.46")
+        self.assertEqual(by_key[("NVDA", "")]["week_52_high"], "212.19")
+        self.assertEqual(by_key[("ORCL", "")]["week_52_low"], "121.24")
+        self.assertEqual(by_key[("TSLA", "")]["week_52_low"], "222.79")
+        self.assertEqual(by_key[("GOOGL 325 Put", "Apr 17 2026")]["day_range_low"], "0.29")
 
     def test_timestamp_only_output_filename(self) -> None:
         created_at = extractor.datetime.fromisoformat("2026-04-15T14:31:16-07:00")
