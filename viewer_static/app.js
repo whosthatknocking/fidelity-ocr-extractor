@@ -2,7 +2,6 @@ const state = {
   files: [],
   rows: [],
   columns: [],
-  overviewRows: [],
   selectedFile: null,
   sortColumn: null,
   sortDirection: 'asc',
@@ -15,7 +14,7 @@ const state = {
   activeTab: 'table',
 };
 
-const VALID_TABS = new Set(['table', 'overview', 'reference']);
+const VALID_TABS = new Set(['table', 'reference']);
 
 const elements = {
   fileSelect: document.getElementById('fileSelect'),
@@ -29,8 +28,6 @@ const elements = {
   prevPageButton: document.getElementById('prevPageButton'),
   nextPageButton: document.getElementById('nextPageButton'),
   pageInfo: document.getElementById('pageInfo'),
-  overviewStatus: document.getElementById('overviewStatus'),
-  overviewGrid: document.getElementById('overviewGrid'),
   referenceContent: document.getElementById('referenceContent'),
   rowModal: document.getElementById('rowModal'),
   rowModalTitle: document.getElementById('rowModalTitle'),
@@ -48,7 +45,6 @@ const elements = {
   clearFilterButton: document.getElementById('clearFilterButton'),
   tabButtons: [...document.querySelectorAll('.tab-button')],
   tableTab: document.getElementById('tableTab'),
-  overviewTab: document.getElementById('overviewTab'),
   referenceTab: document.getElementById('referenceTab'),
   themeToggle: document.getElementById('themeToggle'),
 };
@@ -426,27 +422,6 @@ function renderValueFilter(columnName) {
   });
 }
 
-function renderOverview(rows) {
-  elements.overviewStatus.textContent = `${state.selectedFile} · ${rows.length} symbol groups`;
-  elements.overviewGrid.innerHTML = rows.map((row) => `
-    <article class="overview-card">
-      <div>
-        <p class="eyebrow">Symbol</p>
-        <h2>${escapeHtml(row.symbol)}</h2>
-      </div>
-      <div class="overview-metrics">
-        <div class="overview-metric"><span>Rows</span><strong>${escapeHtml(String(row.row_count))}</strong></div>
-        <div class="overview-metric"><span>Options</span><strong>${escapeHtml(String(row.option_rows))}</strong></div>
-        <div class="overview-metric"><span>Equities</span><strong>${escapeHtml(String(row.equity_rows))}</strong></div>
-        <div class="overview-metric"><span>Expirations</span><strong>${escapeHtml(String(row.expiration_count))}</strong></div>
-        <div class="overview-metric"><span>Last</span><strong>${escapeHtml(String(row.latest_last || '—'))}</strong></div>
-        <div class="overview-metric"><span>Total G/L</span><strong class="${Number(row.total_gl) < 0 ? 'negative' : 'positive'}">${escapeHtml(String(row.total_gl ?? '—'))}</strong></div>
-      </div>
-      <p>${escapeHtml(row.descriptions || 'No description available.')}</p>
-    </article>
-  `).join('');
-}
-
 function parseTableCells(line) {
   const trimmed = line.trim();
   if (!trimmed.includes('|')) return [];
@@ -554,7 +529,6 @@ function activateTab(tabName) {
     button.classList.toggle('active', button.dataset.tab === nextTab);
   });
   elements.tableTab.classList.toggle('active', nextTab === 'table');
-  elements.overviewTab.classList.toggle('active', nextTab === 'overview');
   elements.referenceTab.classList.toggle('active', nextTab === 'reference');
 }
 
@@ -587,21 +561,16 @@ async function loadFiles() {
 }
 
 async function loadData(fileName) {
-  const [dataPayload, overviewPayload] = await Promise.all([
-    fetchJson(`/api/data?file=${encodeURIComponent(fileName)}`),
-    fetchJson(`/api/overview?file=${encodeURIComponent(fileName)}`),
-  ]);
+  const dataPayload = await fetchJson(`/api/data?file=${encodeURIComponent(fileName)}`);
   state.selectedFile = dataPayload.selected_file;
   state.rows = dataPayload.rows;
   state.columns = dataPayload.columns;
-  state.overviewRows = overviewPayload.rows;
   state.columnFilters = {};
   state.currentPage = 1;
   state.columnWidths = {};
   elements.fileSelect.value = state.selectedFile;
   renderFreshnessSummary(dataPayload.freshness_summary);
   renderDatasetCards(dataPayload.dataset_cards);
-  renderOverview(state.overviewRows);
   renderTable();
 }
 
@@ -618,7 +587,6 @@ async function initialize() {
     await loadData(state.files[0].name);
   } else {
     elements.tableStatus.textContent = 'No CSV files found in output/.';
-    elements.overviewStatus.textContent = 'No CSV files found in output/.';
   }
 
   elements.fileSelect.addEventListener('change', async (event) => {

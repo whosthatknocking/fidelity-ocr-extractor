@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 REPO_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = REPO_ROOT / "viewer_static"
 OUTPUT_DIR = REPO_ROOT / "output"
-README_PATH = REPO_ROOT / "README.md"
+FIELD_REFERENCE_PATH = REPO_ROOT / "docs" / "FIELD_REFERENCE.md"
 CSV_PATTERN = "positions_monitoring_*.csv"
 
 
@@ -50,7 +50,7 @@ def load_csv_rows(csv_path: Path) -> tuple[list[str], list[dict[str, str]]]:
 
 
 def read_reference_markdown() -> str:
-    return README_PATH.read_text(encoding="utf-8")
+    return FIELD_REFERENCE_PATH.read_text(encoding="utf-8")
 
 
 def normalize_number(text: str | None) -> float | None:
@@ -113,35 +113,6 @@ def build_dataset_cards(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         {"name": "Screenshot Time", "value": created_at, "description": "Creation time derived from the source PNG."},
     ]
 
-
-def build_overview(rows: list[dict[str, str]]) -> list[dict[str, object]]:
-    grouped: dict[str, list[dict[str, str]]] = {}
-    for row in rows:
-        symbol = row.get("symbol", "") or "Unknown"
-        grouped.setdefault(symbol, []).append(row)
-
-    summary_rows: list[dict[str, object]] = []
-    for symbol, group in sorted(grouped.items()):
-        equities = [row for row in group if row.get("instrument_type") == "equity"]
-        options = [row for row in group if row.get("instrument_type") == "option"]
-        total_gl = sum(normalize_number(row.get("total_gl")) or 0.0 for row in group)
-        quantity_values = [normalize_number(row.get("quantity")) for row in group]
-        summary_rows.append(
-            {
-                "symbol": symbol,
-                "row_count": len(group),
-                "equity_rows": len(equities),
-                "option_rows": len(options),
-                "expiration_count": len({row.get("expiration") for row in options if row.get("expiration")}),
-                "latest_last": next((row.get("last", "") for row in equities if row.get("last")), group[0].get("last", "")),
-                "net_quantity": sum(value or 0.0 for value in quantity_values),
-                "total_gl": total_gl,
-                "descriptions": ", ".join(sorted({row.get("description", "") for row in group if row.get("description")})),
-            }
-        )
-    return summary_rows
-
-
 def build_data_payload(csv_name: str | None) -> dict[str, object]:
     csv_path = resolve_csv_path(csv_name)
     fieldnames, rows = load_csv_rows(csv_path)
@@ -186,16 +157,6 @@ class ViewerHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/data":
             requested_file = parse_qs(parsed.query).get("file", [None])[0]
             self._send_json(build_data_payload(requested_file))
-            return
-        if parsed.path == "/api/overview":
-            requested_file = parse_qs(parsed.query).get("file", [None])[0]
-            payload = build_data_payload(requested_file)
-            self._send_json(
-                {
-                    "selected_file": payload["selected_file"],
-                    "rows": build_overview(payload["rows"]),
-                }
-            )
             return
         if parsed.path == "/api/reference":
             self._send_json({"markdown": read_reference_markdown()})

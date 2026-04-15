@@ -41,7 +41,7 @@ The viewer serves the CSV files in `output/` and provides:
 - sortable, filterable dataset table
 - pagination
 - row detail modal
-- overview cards grouped by symbol
+- reference tab backed by the field reference document
 
 ## Packaging
 

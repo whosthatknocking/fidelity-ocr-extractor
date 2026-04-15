@@ -40,7 +40,7 @@ The viewer opens a local HTTP UI for:
 - sorting and filtering the dataset table
 - paging through rows
 - opening row details
-- browsing grouped overview cards
+- reading the field reference for the current CSV schema
 
 ## Install as a package
 
