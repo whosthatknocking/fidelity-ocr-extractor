@@ -14,6 +14,12 @@ def resize_x(x_value: float) -> float:
 
 
 class ExtractorHelperTests(unittest.TestCase):
+    def test_header_aliases_match_degraded_labels(self) -> None:
+        self.assertTrue(extractor.header_matches("SymDol", "symbol"))
+        self.assertTrue(extractor.header_matches("Chang", "change"))
+        self.assertTrue(extractor.header_matches("Act", "bid"))
+        self.assertTrue(extractor.header_matches("AVS. COS", "avg_cost"))
+
     def test_quantity_normalization_strips_margin_glyph_noise(self) -> None:
         self.assertEqual(extractor.extract_best_field_value("quantity", ["-4 M"]), "-4")
         self.assertEqual(extractor.extract_best_field_value("quantity", ["-1Ф"]), "-1")
@@ -175,6 +181,26 @@ class ExtractorContractTests(unittest.TestCase):
         self.assertEqual(parsed["day_range_high"], "77.93")
         self.assertEqual(parsed["week_52_low"], "68.46")
         self.assertEqual(parsed["week_52_high"], "101.99")
+
+    def test_derive_column_ranges_uses_degraded_header_aliases(self) -> None:
+        header_row = [
+            extractor.OcrItem(text="SymDol", x=0.00, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="Last", x=0.23, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Chang", x=0.30, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="% Change", x=0.36, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="Act", x=0.43, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Ask", x=0.49, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Volume", x=0.56, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Day range", x=0.61, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="AVS. COS", x=0.73, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="Quantity", x=0.81, y=0.0, width=0.05, height=0.01),
+        ]
+
+        column_ranges = extractor.derive_column_ranges(header_row)
+
+        self.assertLess(column_ranges["bid"][0], 0.45)
+        self.assertGreater(column_ranges["bid"][1], column_ranges["bid"][0])
+        self.assertLess(column_ranges["avg_cost"][0], 0.77)
 
     def test_validate_required_fields_raises_for_missing_monitoring_columns(self) -> None:
         record = {

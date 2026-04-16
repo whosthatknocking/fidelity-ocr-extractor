@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Iterable
 
 from PIL import Image
+from PIL import ImageFilter
+from PIL import ImageOps
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -131,6 +133,22 @@ DEFAULT_HEADER_CENTERS = {
     "quantity": 0.825,
     "total_gl": 0.90,
     "percent_total_gl": 0.975,
+}
+
+HEADER_ALIASES = {
+    "symbol": ("symbol", "symdol", "symboi", "symbo1"),
+    "last": ("last",),
+    "change": ("change", "chang"),
+    "percent_change": ("% change", "percent change", "%change"),
+    "bid": ("bid", "bld", "8id", "act"),
+    "ask": ("ask",),
+    "volume": ("volume", "volurne"),
+    "day_range": ("day range", "dayrange"),
+    "week_52_range": ("52-week range", "52 week range", "52-weekrange"),
+    "avg_cost": ("avg cost", "avs cos", "avg cos"),
+    "quantity": ("quantity",),
+    "total_gl": ("$ total g/l", "total g/l", "$ total gl"),
+    "percent_total_gl": ("% total g/l", "% total gl"),
 }
 
 OUTPUT_FIELDS = [
@@ -273,6 +291,52 @@ def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def normalize_header_label(text: str) -> str:
+    cleaned = clean_text(text).lower()
+    cleaned = cleaned.replace(".", "")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def header_matches(text: str, key: str) -> bool:
+    normalized = normalize_header_label(text)
+    return any(alias in normalized for alias in HEADER_ALIASES[key])
+
+
+def preprocess_for_ocr(image: Image.Image, variant: str) -> Image.Image:
+    processed = image.convert("L")
+    if variant == "grayscale":
+        return processed
+    if variant == "contrast":
+        return ImageOps.autocontrast(processed, cutoff=1)
+    if variant == "sharpen":
+        contrasted = ImageOps.autocontrast(processed, cutoff=1)
+        return contrasted.filter(ImageFilter.SHARPEN)
+    if variant == "binary":
+        contrasted = ImageOps.autocontrast(processed, cutoff=1)
+        return contrasted.point(lambda pixel: 255 if pixel > 170 else 0)
+    raise ValueError(f"Unknown OCR preprocess variant: {variant}")
+
+
+def run_vision_ocr_image(image: Image.Image) -> list[OcrItem]:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+        temp_path = Path(handle.name)
+    try:
+        image.save(temp_path)
+        return run_vision_ocr(temp_path)
+    finally:
+        if temp_path.exists():
+            os.unlink(temp_path)
+
+
+def run_vision_ocr_variants(image_path: Path, variants: list[str]) -> dict[str, list[OcrItem]]:
+    variant_items: dict[str, list[OcrItem]] = {}
+    with Image.open(image_path) as image:
+        for variant in variants:
+            variant_items[variant] = run_vision_ocr_image(preprocess_for_ocr(image, variant))
+    return variant_items
+
+
 def items_in_range(items: list[OcrItem], left: float, right: float) -> list[OcrItem]:
     return [item for item in items if left <= item.center_x < right]
 
@@ -326,34 +390,38 @@ def derive_column_ranges(header_row: list[OcrItem] | None) -> dict[str, tuple[fl
     anchors: dict[str, float] = {}
     ordered = sorted(header_row, key=lambda entry: entry.x)
     for index, item in enumerate(ordered):
-        text = clean_text(item.text).lower()
-        previous_text = clean_text(ordered[index - 1].text).lower() if index > 0 else ""
-        next_text = clean_text(ordered[index + 1].text).lower() if index + 1 < len(ordered) else ""
+        text = normalize_header_label(item.text)
+        previous_text = (
+            normalize_header_label(ordered[index - 1].text) if index > 0 else ""
+        )
+        next_text = (
+            normalize_header_label(ordered[index + 1].text) if index + 1 < len(ordered) else ""
+        )
         item_center = item.x + (item.width / 2)
 
-        if "symbol" in text:
+        if header_matches(text, "symbol"):
             anchors["symbol"] = item_center
-        elif "last" in text:
+        elif header_matches(text, "last"):
             anchors["last"] = item_center
-        elif "bid" in text:
+        elif header_matches(text, "bid"):
             anchors["bid"] = item_center
-        elif "ask" in text:
+        elif header_matches(text, "ask"):
             anchors["ask"] = item_center
-        elif "volume" in text:
+        elif header_matches(text, "volume"):
             anchors["volume"] = item_center
-        elif "quantity" in text:
+        elif header_matches(text, "quantity"):
             anchors["quantity"] = item_center
-        elif "avg" in text and "cost" in text:
+        elif header_matches(text, "avg_cost"):
             anchors["avg_cost"] = item_center
-        elif "day" in text:
+        elif header_matches(text, "day_range"):
             anchors["day_range"] = item_center
-        elif "52" in text or "week" in text:
+        elif header_matches(text, "week_52_range"):
             anchors["week_52_range"] = item_center
-        elif "total" in text and "%" in text:
+        elif header_matches(text, "percent_total_gl"):
             anchors["percent_total_gl"] = item_center
-        elif "total" in text:
+        elif header_matches(text, "total_gl"):
             anchors["total_gl"] = item_center
-        elif "%" in text and "change" in text:
+        elif header_matches(text, "percent_change"):
             anchors["percent_change"] = item_center
         elif "%" in text and "change" in next_text:
             next_item = ordered[index + 1]
@@ -408,7 +476,12 @@ def looks_numeric(text: str) -> bool:
 
 def is_header_row(row: list[OcrItem]) -> bool:
     text = " ".join(item.text for item in row)
-    return "Symbol" in text and "Last" in text and "Quantity" in text
+    normalized = normalize_header_label(text)
+    return (
+        header_matches(normalized, "symbol")
+        and header_matches(normalized, "last")
+        and header_matches(normalized, "quantity")
+    )
 
 
 def is_main_data_row(row: list[OcrItem], column_ranges: dict[str, tuple[float, float]]) -> bool:
@@ -811,9 +884,45 @@ def detect_header_row(rows: list[list[OcrItem]]) -> list[OcrItem] | None:
     return None
 
 
+def select_ocr_rows(image_path: Path) -> list[list[OcrItem]]:
+    variant_items = run_vision_ocr_variants(
+        image_path, ["grayscale", "contrast", "sharpen", "binary"]
+    )
+    best_rows: list[list[OcrItem]] = []
+    best_score = -1
+    for items in variant_items.values():
+        rows = group_rows(items)
+        header_row = detect_header_row(rows)
+        score = 0
+        if header_row is not None:
+            score += 100
+            normalized = " ".join(normalize_header_label(item.text) for item in header_row)
+            for key in (
+                "symbol",
+                "last",
+                "change",
+                "percent_change",
+                "bid",
+                "ask",
+                "volume",
+                "day_range",
+                "week_52_range",
+                "avg_cost",
+                "quantity",
+                "total_gl",
+                "percent_total_gl",
+            ):
+                if header_matches(normalized, key):
+                    score += 10
+        score += len(rows)
+        if score > best_score:
+            best_rows = rows
+            best_score = score
+    return best_rows
+
+
 def build_records(image_path: Path) -> list[dict[str, str]]:
-    items = run_vision_ocr(image_path)
-    rows = group_rows(items)
+    rows = select_ocr_rows(image_path)
     header_row = detect_header_row(rows)
     column_ranges = derive_column_ranges(header_row)
     symbol_right_boundary = min(column_ranges["last"][0], 0.30)
