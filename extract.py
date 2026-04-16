@@ -14,10 +14,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+from typing import NamedTuple
 
 from PIL import Image
 from PIL import ImageFilter
 from PIL import ImageOps
+from PIL import ImageStat
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -173,8 +175,6 @@ OUTPUT_FIELDS = [
     "quantity",
     "total_gl",
     "percent_total_gl",
-    "row_confidence",
-    "review_notes",
 ]
 
 MONTH_FIXES = {
@@ -228,6 +228,73 @@ MONEY_FIELDS = {"last", "bid", "ask", "avg_cost", "total_gl", "change"}
 PERCENT_FIELDS = {"percent_change", "percent_total_gl"}
 INTEGER_FIELDS = {"volume", "quantity"}
 RANGE_FIELDS = {"day_range_low", "day_range_high", "week_52_low", "week_52_high"}
+HEADER_REQUIRED_KEYS = {
+    "symbol",
+    "last",
+    "change",
+    "percent_change",
+    "bid",
+    "ask",
+    "volume",
+    "day_range",
+    "avg_cost",
+    "quantity",
+    "total_gl",
+    "percent_total_gl",
+}
+MIN_IMAGE_WIDTH = 1200
+MIN_IMAGE_HEIGHT = 700
+MIN_IMAGE_STDDEV = 18.0
+MAX_CELL_OCR_CALLS = 24
+HEADER_OCR_VARIANTS = ["grayscale", "contrast", "sharpen", "binary"]
+CELL_OCR_VARIANTS = ("grayscale", "binary")
+RETRY_PRIORITY_FIELDS = REQUIRED_FIELDS + ["last", "change", "percent_total_gl", "total_gl", "avg_cost"]
+
+
+class ImageQualityError(ValueError):
+    pass
+
+
+class OcrBudgetExceededError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class RowGeometry:
+    top: int
+    bottom: int
+    left_symbol_boundary: float
+    row_items: list[OcrItem]
+
+
+@dataclass
+class OcrBudget:
+    max_calls: int = MAX_CELL_OCR_CALLS
+    calls_used: int = 0
+
+    def consume(self) -> None:
+        self.calls_used += 1
+        if self.calls_used > self.max_calls:
+            raise OcrBudgetExceededError(f"Exceeded OCR cell budget of {self.max_calls} calls")
+
+
+@dataclass
+class RawRecord:
+    schema_name: str
+    image_file: str
+    created_at: str
+    symbol: str
+    instrument_type: str
+    description: str
+    expiration: str
+    raw_fields: dict[str, str]
+    retried_fields: list[str]
+
+
+class SelectedRows(NamedTuple):
+    rows: list[list[OcrItem]]
+    header_row: list[OcrItem]
+    column_ranges: dict[str, tuple[float, float]]
 
 
 def run_vision_ocr(image_path: Path) -> list[OcrItem]:
@@ -342,6 +409,22 @@ def run_vision_ocr_variants(image_path: Path, variants: list[str]) -> dict[str, 
         for variant in variants:
             variant_items[variant] = run_vision_ocr_image(preprocess_for_ocr(image, variant))
     return variant_items
+
+
+def validate_image_quality(image_path: Path) -> None:
+    with Image.open(image_path) as image:
+        if image.width < MIN_IMAGE_WIDTH or image.height < MIN_IMAGE_HEIGHT:
+            raise ImageQualityError(
+                f"{image_path.name} is too small for reliable extraction: "
+                f"{image.width}x{image.height}"
+            )
+        grayscale = image.convert("L")
+        contrast = ImageStat.Stat(grayscale).stddev[0]
+        if contrast < MIN_IMAGE_STDDEV:
+            raise ImageQualityError(
+                f"{image_path.name} has insufficient contrast for reliable extraction: "
+                f"{contrast:.2f}"
+            )
 
 
 def items_in_range(items: list[OcrItem], left: float, right: float) -> list[OcrItem]:
@@ -647,6 +730,113 @@ def is_valid_field_value(field_name: str, value: str) -> bool:
     return True
 
 
+def normalize_number(text: str | None) -> float | None:
+    if text is None:
+        return None
+    cleaned = str(text).strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.replace("$", "").replace("%", "").replace(",", "")
+    cleaned = re.sub(r"[^0-9.+-]", "", cleaned)
+    if cleaned in {"", "+", "-", ".", "+.", "-."}:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def format_price(value: float, *, signed: bool = False, positive_sign: bool = False) -> str:
+    sign = ""
+    absolute = value
+    if signed:
+        if value < 0:
+            sign = "-"
+            absolute = -value
+        elif positive_sign:
+            sign = "+"
+    return f"{sign}${absolute:.2f}"
+
+
+def repair_price_from_context(value: str, context: str) -> str:
+    numeric_value = normalize_number(value)
+    numeric_context = normalize_number(context)
+    if numeric_value is None or numeric_context is None:
+        return value
+    value_text = f"{numeric_value:.2f}"
+    context_text = f"{numeric_context:.2f}"
+    if len(value_text) == len(context_text) + 1 and value_text.endswith(context_text[1:]):
+        return format_price(numeric_context)
+    value_whole, value_frac = value_text.split(".", 1)
+    context_whole, _context_frac = context_text.split(".", 1)
+    if len(value_whole) == len(context_whole) and len(context_whole) >= 2:
+        candidate_text = f"{context_whole[:-1]}{value_whole[-1]}.{value_frac}"
+        candidate = float(candidate_text)
+        if abs(candidate - numeric_context) < abs(numeric_value - numeric_context):
+            return format_price(candidate)
+    return value
+
+
+def repair_range_from_references(value: str, references: list[str]) -> str:
+    numeric_value = normalize_number(value)
+    numeric_refs = [reference for reference in (normalize_number(item) for item in references) if reference is not None]
+    if numeric_value is None or not numeric_refs:
+        return value
+    ref_floor = min(numeric_refs)
+    ref_ceiling = max(numeric_refs)
+    if ref_floor <= numeric_value <= ref_ceiling + 25:
+        return value
+
+    value_text = f"{numeric_value:.2f}"
+    reference_text = f"{ref_floor:.2f}"
+    value_whole, value_frac = value_text.split(".", 1)
+    ref_whole, _ref_frac = reference_text.split(".", 1)
+    if len(value_whole) + 1 == len(ref_whole):
+        candidate_text = f"{ref_whole[0]}{value_whole}.{value_frac}"
+        candidate = float(candidate_text)
+        if ref_floor - 25 <= candidate <= ref_ceiling + 25:
+            return candidate_text
+    return value
+
+
+def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
+    reconciled = dict(record)
+    if reconciled.get("bid") and reconciled.get("ask"):
+        reconciled["ask"] = repair_price_from_context(
+            reconciled["ask"], reconciled.get("bid", "")
+        )
+        reconciled["bid"] = repair_price_from_context(
+            reconciled["bid"], reconciled.get("ask", "")
+        )
+    if reconciled.get("last"):
+        reference_price = reconciled.get("bid") or reconciled.get("ask") or reconciled.get("last", "")
+        reconciled["last"] = repair_price_from_context(reconciled["last"], reference_price)
+
+    bid = normalize_number(reconciled.get("bid"))
+    ask = normalize_number(reconciled.get("ask"))
+    last = normalize_number(reconciled.get("last"))
+    if bid is not None and ask is not None and bid > ask and (bid - ask) <= 1.0:
+        reconciled["ask"] = format_price(max(bid, ask, last or ask))
+
+    price_refs = [reconciled.get("last", ""), reconciled.get("bid", ""), reconciled.get("ask", "")]
+    if reconciled.get("day_range_low"):
+        reconciled["day_range_low"] = repair_range_from_references(
+            reconciled["day_range_low"], price_refs
+        )
+    if reconciled.get("day_range_high"):
+        reconciled["day_range_high"] = repair_range_from_references(
+            reconciled["day_range_high"], price_refs
+        )
+
+    day_low = normalize_number(reconciled.get("day_range_low"))
+    day_high = normalize_number(reconciled.get("day_range_high"))
+    numeric_prices = [price for price in (normalize_number(item) for item in price_refs) if price is not None]
+    if day_low is not None and day_high is not None and day_low > day_high and numeric_prices:
+        reconciled["day_range_low"] = f"{min(numeric_prices + [day_low, day_high]):.2f}"
+        reconciled["day_range_high"] = f"{max(numeric_prices + [day_low, day_high]):.2f}"
+    return reconciled
+
+
 def field_needs_retry(field_name: str, value: str) -> bool:
     if field_name in REQUIRED_FIELDS and not value:
         return True
@@ -703,43 +893,76 @@ def looks_like_expiration(text: str) -> bool:
     )
 
 
+def looks_like_option_symbol(text: str) -> bool:
+    normalized = normalize_symbol_line(text)
+    return bool(re.fullmatch(r"[A-Z]{1,5}\s+\d+(?:\.\d+)?\s+(?:Call|Put)", normalized))
+
+
+def looks_like_equity_symbol(text: str) -> bool:
+    normalized = normalize_symbol_line(text)
+    return bool(re.fullmatch(r"[A-Z]{1,5}", normalized))
+
+
+def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
+    normalized = [clean_text(line) for line in lines if clean_text(line)]
+    option_candidates = [line for line in normalized if looks_like_option_symbol(line)]
+    if option_candidates:
+        symbol = normalize_symbol_line(option_candidates[-1])
+        remaining = [line for line in normalized if clean_text(line) != symbol]
+        return symbol, remaining
+
+    equity_candidates = [line for line in normalized if looks_like_equity_symbol(line)]
+    if equity_candidates:
+        symbol = normalize_symbol_line(equity_candidates[0])
+        remaining = normalized[normalized.index(equity_candidates[0]) + 1 :]
+        return symbol, remaining
+
+    for line in normalized:
+        if looks_like_expiration(line):
+            continue
+        compact = normalize_symbol_line(line)
+        tokens = compact.split()
+        if tokens and re.fullmatch(r"[A-Z]{1,5}", tokens[0]):
+            symbol = tokens[0]
+            remainder = " ".join(tokens[1:])
+            remaining = ([remainder] if remainder else []) + normalized[normalized.index(line) + 1 :]
+            return symbol, remaining
+    return "", normalized
+
+
 def parse_symbol_block(lines: list[str]) -> tuple[str, str, str, str]:
     cleaned = [clean_text(line) for line in lines if clean_text(line)]
     if not cleaned:
         return "", "unknown", "", ""
 
-    first = normalize_symbol_line(cleaned[0])
-    if " Call" in first or " Put" in first:
+    symbol_line, remaining_lines = select_symbol_lines(cleaned)
+    if symbol_line and (" Call" in symbol_line or " Put" in symbol_line):
         expiration = ""
-        for candidate in cleaned[1:]:
+        for candidate in cleaned:
             if looks_like_expiration(candidate):
                 expiration = clean_text(candidate)
-                break
-        return first, "option", "", expiration
+        return symbol_line, "option", "", expiration
 
-    if len(cleaned) == 1:
+    first = normalize_symbol_line(symbol_line or cleaned[0])
+    if len(cleaned) == 1 or (symbol_line and not remaining_lines):
         tokens = first.split()
-        if len(tokens) >= 2 and re.fullmatch(r"[A-Z]{1,5}", tokens[0]):
+        if len(tokens) >= 1 and re.fullmatch(r"[A-Z]{1,5}", tokens[0]):
             description_tokens = tokens[1:]
             if description_tokens and re.fullmatch(r"[A-Z]", description_tokens[0]):
                 description_tokens = description_tokens[1:]
             return tokens[0], "equity", normalize_description(" ".join(description_tokens)), ""
-        if (
-            len(tokens) >= 2
-            and re.fullmatch(r"[A-Z]{1,5}", tokens[-1])
-            and tokens[-1] not in {"COM", "CORP", "INC", "FUND", "CL", "CLA"}
-        ):
+        if len(tokens) >= 2 and re.fullmatch(r"[A-Z]{1,5}", tokens[-1]):
             return tokens[-1], "equity", normalize_description(" ".join(tokens[:-1])), ""
 
     description = ""
-    for candidate in cleaned[1:]:
+    for candidate in remaining_lines or cleaned[1:]:
         if not looks_like_expiration(candidate):
             description = normalize_description(candidate)
             break
     return first, "equity", description, ""
 
 
-def parse_main_row(
+def parse_main_row_raw(
     row: list[OcrItem],
     column_ranges: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, str]:
@@ -747,23 +970,41 @@ def parse_main_row(
     parsed: dict[str, str] = {}
     for name, (left, right) in active_ranges.items():
         parsed[name] = join_items(items_in_range(row, left, right))
+    return parsed
 
+
+def normalize_parsed_fields(parsed: dict[str, str]) -> dict[str, str]:
+    normalized = dict(parsed)
     total_gl = parsed.get("total_gl", "")
     percent_total_gl = parsed.get("percent_total_gl", "")
     if total_gl and not total_gl.startswith(("+", "-")) and percent_total_gl.startswith("-"):
-        parsed["total_gl"] = f"-{total_gl.lstrip('-')}"
+        normalized["total_gl"] = f"-{total_gl.lstrip('-')}"
     if total_gl and not total_gl.startswith(("+", "-")) and percent_total_gl.startswith("+"):
-        parsed["total_gl"] = f"+{total_gl.lstrip('+')}"
+        normalized["total_gl"] = f"+{total_gl.lstrip('+')}"
 
-    parsed["percent_change"] = normalize_percent_text(parsed.get("percent_change", ""))
-    parsed["percent_total_gl"] = normalize_percent_text(
-        parsed.get("percent_total_gl", ""),
-        paired_amount=parsed.get("total_gl", ""),
+    normalized["last"] = normalize_field_value("last", normalized.get("last", ""))
+    normalized["change"] = normalize_field_value("change", normalized.get("change", ""))
+    normalized["bid"] = normalize_field_value("bid", normalized.get("bid", ""))
+    normalized["ask"] = normalize_field_value("ask", normalized.get("ask", ""))
+    normalized["avg_cost"] = normalize_field_value("avg_cost", normalized.get("avg_cost", ""))
+    normalized["total_gl"] = normalize_field_value("total_gl", normalized.get("total_gl", ""))
+    normalized["volume"] = normalize_field_value("volume", normalized.get("volume", ""))
+    normalized["quantity"] = normalize_field_value("quantity", normalized.get("quantity", ""))
+    normalized["percent_change"] = normalize_percent_text(normalized.get("percent_change", ""))
+    normalized["percent_total_gl"] = normalize_percent_text(
+        normalized.get("percent_total_gl", ""),
+        paired_amount=normalized.get("total_gl", ""),
     )
     for field_name in ("day_range_low", "day_range_high", "week_52_low", "week_52_high"):
-        parsed[field_name] = normalize_range_text(parsed.get(field_name, ""))
+        normalized[field_name] = normalize_range_text(normalized.get(field_name, ""))
+    return normalized
 
-    return parsed
+
+def parse_main_row(
+    row: list[OcrItem],
+    column_ranges: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, str]:
+    return normalize_parsed_fields(parse_main_row_raw(row, column_ranges))
 
 
 def attach_range_row(
@@ -805,19 +1046,46 @@ def row_pixel_bounds(row: list[OcrItem], image_height: int) -> tuple[int, int]:
     return top, bottom
 
 
+def build_row_geometry(
+    row: list[OcrItem],
+    image_height: int,
+    symbol_right_boundary: float,
+) -> RowGeometry:
+    top, bottom = row_pixel_bounds(row, image_height)
+    return RowGeometry(
+        top=top,
+        bottom=bottom,
+        left_symbol_boundary=symbol_right_boundary,
+        row_items=row,
+    )
+
+
+def cell_pixel_bounds(
+    image_size: tuple[int, int],
+    geometry: RowGeometry,
+    bounds: tuple[float, float],
+) -> tuple[int, int, int, int]:
+    width, _height = image_size
+    crop_left = max(0, int(bounds[0] * width) - 4)
+    crop_right = min(width, int(bounds[1] * width) + 4)
+    return crop_left, geometry.top, crop_right, geometry.bottom
+
+
 def crop_ocr_items(
     image: Image.Image,
-    row: list[OcrItem],
-    left: float,
-    right: float,
+    geometry: RowGeometry,
+    bounds: tuple[float, float],
+    budget: OcrBudget,
+    cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]],
     scale: int = 10,
     threshold: int | None = None,
     variant: str = "grayscale",
 ) -> list[OcrItem]:
-    width, height = image.size
-    top, bottom = row_pixel_bounds(row, height)
-    crop_left = max(0, int(left * width) - 4)
-    crop_right = min(width, int(right * width) + 4)
+    crop_left, top, crop_right, bottom = cell_pixel_bounds(image.size, geometry, bounds)
+    cache_key = (crop_left, top, crop_right, bottom, scale, threshold, variant)
+    if cache_key in cache:
+        return cache[cache_key]
+    budget.consume()
     crop = image.crop((crop_left, top, crop_right, bottom))
     crop = preprocess_for_ocr(crop, variant)
     if threshold is not None:
@@ -828,33 +1096,43 @@ def crop_ocr_items(
         temp_path = Path(handle.name)
     try:
         crop.save(temp_path)
-        return run_vision_ocr(temp_path)
+        items = run_vision_ocr(temp_path)
+        cache[cache_key] = items
+        return items
     finally:
         if temp_path.exists():
             os.unlink(temp_path)
 
 
 def collect_cell_texts(
+    field_name: str,
     image: Image.Image,
-    row: list[OcrItem],
+    geometry: RowGeometry,
     bounds: tuple[float, float],
+    budget: OcrBudget,
+    cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]],
     attempts: list[tuple[float, int, int | None]] | None = None,
 ) -> list[str]:
     texts: list[str] = []
     planned_attempts = attempts or [(1.0, 8, None), (1.15, 10, 160)]
     for factor, scale, threshold in planned_attempts:
-        left, right = expand_range(bounds, factor)
-        for variant in ("grayscale", "contrast", "binary"):
+        expanded_bounds = expand_range(bounds, factor)
+        for variant in CELL_OCR_VARIANTS:
             crop_items = crop_ocr_items(
                 image,
-                row,
-                left,
-                right,
+                geometry,
+                expanded_bounds,
+                budget,
+                cache,
                 scale=scale,
                 threshold=threshold,
                 variant=variant,
             )
             texts.extend(item.text for item in crop_items)
+            candidate = extract_best_field_value(field_name, texts)
+            normalized = normalize_field_value(field_name, candidate)
+            if is_valid_field_value(field_name, normalized):
+                return texts
     return texts
 
 
@@ -973,6 +1251,7 @@ def repair_record_from_crop_texts(
     for field_name in ("day_range_low", "day_range_high", "week_52_low", "week_52_high"):
         repaired[field_name] = normalize_range_text(repaired.get(field_name, ""))
 
+    repaired = reconcile_numeric_fields(repaired)
     repaired["_retried_fields"] = sorted(retried_fields)
 
     return repaired
@@ -980,33 +1259,50 @@ def repair_record_from_crop_texts(
 
 def repair_record_from_image_crop(
     image: Image.Image,
-    row: list[OcrItem],
+    geometry: RowGeometry,
     record: dict[str, str],
     column_ranges: dict[str, tuple[float, float]],
+    budget: OcrBudget,
+    cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]],
 ) -> dict[str, str]:
-    symbol_right_boundary = min(column_ranges["last"][0], 0.30)
     left_lines: list[str] = []
-    for variant in ("grayscale", "contrast", "binary"):
+    for variant in CELL_OCR_VARIANTS:
         left_items = crop_ocr_items(
-            image, row, 0.0, symbol_right_boundary, scale=10, variant=variant
+            image,
+            geometry,
+            (0.0, geometry.left_symbol_boundary),
+            budget,
+            cache,
+            scale=10,
+            variant=variant,
         )
         left_lines.extend(lines_from_crop_items(left_items))
 
     field_texts: dict[str, list[str]] = {}
-    for field_name, bounds in column_ranges.items():
+    suspicious_fields = detect_suspicious_fields(record)
+    retry_fields = []
+    for field_name in RETRY_PRIORITY_FIELDS:
+        if field_name in column_ranges and field_name not in retry_fields:
+            retry_fields.append(field_name)
+    for field_name in suspicious_fields:
+        if field_name in column_ranges and field_name not in retry_fields:
+            retry_fields.append(field_name)
+
+    for field_name in retry_fields:
+        bounds = column_ranges[field_name]
         existing_value = normalize_field_value(
             field_name,
             record.get(field_name, ""),
             paired_amount=record.get("total_gl", ""),
         )
         record[field_name] = existing_value
-        if not field_needs_retry(field_name, existing_value):
+        if field_name not in suspicious_fields and not field_needs_retry(field_name, existing_value):
             continue
 
         attempts = CELL_REPAIR_ATTEMPTS.get(field_name, [(1.0, 8, None), (1.15, 10, 160)])
-        raw_texts = [item.text for item in items_in_range(row, bounds[0], bounds[1])]
+        raw_texts = [item.text for item in items_in_range(geometry.row_items, bounds[0], bounds[1])]
         texts = list(raw_texts)
-        texts.extend(collect_cell_texts(image, row, bounds, attempts))
+        texts.extend(collect_cell_texts(field_name, image, geometry, bounds, budget, cache, attempts))
         if texts:
             field_texts[field_name] = texts
 
@@ -1021,33 +1317,56 @@ def validate_required_fields(record: dict[str, str], image_path: Path) -> None:
         )
 
 
-def classify_record_confidence(record: dict[str, str]) -> tuple[str, str]:
-    retried_fields = [field for field in record.get("_retried_fields", []) if field]
+def validate_field_shapes(record: dict[str, str], image_path: Path) -> None:
     invalid_fields = [
         field_name
         for field_name in REQUIRED_FIELDS
         if record.get(field_name) and not is_valid_field_value(field_name, record.get(field_name, ""))
     ]
-
-    notes: list[str] = []
-    if retried_fields:
-        notes.append(f"repaired:{','.join(retried_fields)}")
     if invalid_fields:
-        notes.append(f"invalid:{','.join(invalid_fields)}")
-        return "low", "; ".join(notes)
-    if retried_fields:
-        return "repaired", "; ".join(notes)
-    return "ok", ""
+        raise ValueError(
+            f"Invalid extracted field shapes for {image_path.name}: {', '.join(invalid_fields)}"
+        )
+
+
+def validate_cross_field_consistency(record: dict[str, str], image_path: Path) -> None:
+    bid = normalize_number(record.get("bid"))
+    ask = normalize_number(record.get("ask"))
+    day_low = normalize_number(record.get("day_range_low"))
+    day_high = normalize_number(record.get("day_range_high"))
+    if bid is not None and ask is not None and bid > ask:
+        raise ValueError(f"Bid exceeds ask for {image_path.name}: {record.get('symbol', '')}")
+    if day_low is not None and day_high is not None and day_low > day_high:
+        raise ValueError(
+            f"Day range low exceeds high for {image_path.name}: {record.get('symbol', '')}"
+        )
+
+
+def detect_suspicious_fields(record: dict[str, str]) -> set[str]:
+    suspicious: set[str] = set()
+    bid = normalize_number(record.get("bid"))
+    ask = normalize_number(record.get("ask"))
+    last = normalize_number(record.get("last"))
+    day_low = normalize_number(record.get("day_range_low"))
+    day_high = normalize_number(record.get("day_range_high"))
+
+    if bid is not None and ask is not None and bid > ask:
+        suspicious.update({"bid", "ask"})
+    if day_low is not None and day_high is not None and day_low > day_high:
+        suspicious.update({"day_range_low", "day_range_high"})
+    if last is not None and day_low is not None and day_high is not None:
+        if last < day_low or last > day_high:
+            suspicious.update({"last", "day_range_low", "day_range_high"})
+    return suspicious
 
 
 def finalize_record(record: dict[str, str] | None, image_path: Path) -> dict[str, str] | None:
     if record is None:
         return None
     validate_required_fields(record, image_path)
-    confidence, notes = classify_record_confidence(record)
     finalized = dict(record)
-    finalized["row_confidence"] = confidence
-    finalized["review_notes"] = notes
+    validate_field_shapes(finalized, image_path)
+    validate_cross_field_consistency(finalized, image_path)
     finalized.pop("_retried_fields", None)
     return finalized
 
@@ -1059,11 +1378,17 @@ def detect_header_row(rows: list[list[OcrItem]]) -> list[OcrItem] | None:
     return None
 
 
-def select_ocr_rows(image_path: Path) -> list[list[OcrItem]]:
-    variant_items = run_vision_ocr_variants(
-        image_path, ["grayscale", "contrast", "sharpen", "binary"]
-    )
+def header_anchor_count(header_row: list[OcrItem]) -> int:
+    normalized = " ".join(normalize_header_label(item.text) for item in header_row)
+    return sum(1 for key in HEADER_REQUIRED_KEYS if header_matches(normalized, key))
+
+
+def select_ocr_rows(image_path: Path) -> SelectedRows:
+    validate_image_quality(image_path)
+    variant_items = run_vision_ocr_variants(image_path, HEADER_OCR_VARIANTS)
     best_rows: list[list[OcrItem]] = []
+    best_header: list[OcrItem] | None = None
+    best_ranges = dict(DEFAULT_COLUMN_RANGES)
     best_score = -1
     for items in variant_items.values():
         rows = group_rows(items)
@@ -1071,41 +1396,35 @@ def select_ocr_rows(image_path: Path) -> list[list[OcrItem]]:
         score = 0
         if header_row is not None:
             score += 100
-            normalized = " ".join(normalize_header_label(item.text) for item in header_row)
-            for key in (
-                "symbol",
-                "last",
-                "change",
-                "percent_change",
-                "bid",
-                "ask",
-                "volume",
-                "day_range",
-                "week_52_range",
-                "avg_cost",
-                "quantity",
-                "total_gl",
-                "percent_total_gl",
-            ):
-                if header_matches(normalized, key):
-                    score += 10
+            score += 10 * header_anchor_count(header_row)
         score += len(rows)
         if score > best_score:
             best_rows = rows
+            best_header = header_row
+            best_ranges = derive_column_ranges(header_row)
             best_score = score
-    return best_rows
+    if best_header is None:
+        raise ImageQualityError(f"{image_path.name} does not expose a recognizable monitoring header")
+    anchors = header_anchor_count(best_header)
+    if anchors < 10:
+        raise ImageQualityError(
+            f"{image_path.name} header OCR is too degraded for reliable extraction: "
+            f"{anchors} anchors detected"
+        )
+    return SelectedRows(best_rows, best_header, best_ranges)
 
 
 def build_records(image_path: Path) -> list[dict[str, str]]:
-    rows = select_ocr_rows(image_path)
-    header_row = detect_header_row(rows)
-    column_ranges = derive_column_ranges(header_row)
+    selected = select_ocr_rows(image_path)
+    rows = selected.rows
+    column_ranges = selected.column_ranges
     symbol_right_boundary = min(column_ranges["last"][0], 0.30)
     created_at = image_created_at(image_path).isoformat(timespec="seconds")
 
     records: list[dict[str, str]] = []
     pending_symbol_lines: list[str] = []
     current_record: dict[str, str] | None = None
+    crop_cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]] = {}
 
     with Image.open(image_path) as image:
         for row in rows:
@@ -1117,25 +1436,38 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                 if current_record is not None:
                     records.append(finalize_record(current_record, image_path))
 
-                pending_symbol_lines.extend(left_lines)
-                symbol, instrument_type, description, expiration = parse_symbol_block(
-                    pending_symbol_lines
+                candidate_lines = left_lines if select_symbol_lines(left_lines)[0] else pending_symbol_lines + left_lines
+                symbol, instrument_type, description, expiration = parse_symbol_block(candidate_lines)
+                raw_record = RawRecord(
+                    schema_name=SCHEMA_NAME,
+                    image_file=image_path.name,
+                    created_at=created_at,
+                    symbol=symbol,
+                    instrument_type=instrument_type,
+                    description=description,
+                    expiration=expiration,
+                    raw_fields=parse_main_row_raw(row, column_ranges),
+                    retried_fields=[],
                 )
                 current_record = {
                     "schema_name": SCHEMA_NAME,
                     "image_file": image_path.name,
                     "created_at": created_at,
-                    "symbol": symbol,
-                    "instrument_type": instrument_type,
-                    "description": description,
-                    "expiration": expiration,
-                    **parse_main_row(row, column_ranges),
+                    "symbol": raw_record.symbol,
+                    "instrument_type": raw_record.instrument_type,
+                    "description": raw_record.description,
+                    "expiration": raw_record.expiration,
+                    **normalize_parsed_fields(raw_record.raw_fields),
                 }
+                geometry = build_row_geometry(row, image.size[1], symbol_right_boundary)
+                budget = OcrBudget()
                 current_record = repair_record_from_image_crop(
                     image=image,
-                    row=row,
+                    geometry=geometry,
                     record=current_record,
                     column_ranges=column_ranges,
+                    budget=budget,
+                    cache=crop_cache,
                 )
                 pending_symbol_lines = []
                 continue

@@ -1,8 +1,12 @@
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
 import extract as extractor
+
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def sample_created_at() -> extractor.datetime:
@@ -41,6 +45,46 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(extractor.normalize_integer_text("3.191 887"), "3,191,887")
         self.assertTrue(extractor.field_needs_retry("bid", "Act"))
         self.assertFalse(extractor.field_needs_retry("bid", "$64.83"))
+
+    def test_reconcile_numeric_fields_repairs_shifted_digits(self) -> None:
+        reconciled = extractor.reconcile_numeric_fields(
+            {
+                "last": "$197.78",
+                "bid": "$197.78",
+                "ask": "$107.70",
+                "day_range_low": "334.52",
+                "day_range_high": "39.88",
+            }
+        )
+        self.assertEqual(reconciled["ask"], "$197.78")
+        reconciled = extractor.reconcile_numeric_fields(
+            {
+                "last": "$3335.08",
+                "bid": "$335.08",
+                "ask": "$335.11",
+                "day_range_low": "334.52",
+                "day_range_high": "39.88",
+            }
+        )
+        self.assertEqual(reconciled["last"], "$335.08")
+        self.assertEqual(reconciled["day_range_high"], "339.88")
+        reconciled = extractor.reconcile_numeric_fields(
+            {
+                "last": "$0.65",
+                "bid": "$0.64",
+                "ask": "$0.65",
+                "day_range_low": "0.88",
+                "day_range_high": "0.05",
+            }
+        )
+        self.assertEqual(reconciled["day_range_low"], "0.05")
+        self.assertEqual(reconciled["day_range_high"], "0.88")
+
+    def test_normalize_parsed_fields_uses_regression_fixture(self) -> None:
+        fixture = json.loads((FIXTURES_DIR / "noisy_option_row.json").read_text(encoding="utf-8"))
+        normalized = extractor.normalize_parsed_fields(fixture["raw_fields"])
+        for key, value in fixture["expected"].items():
+            self.assertEqual(normalized[key], value)
 
     def test_percent_normalization_repairs_missing_decimal_and_sign(self) -> None:
         self.assertEqual(extractor.normalize_percent_text("+599%"), "+5.99%")
@@ -105,25 +149,60 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(repaired["week_52_high"], "28.00")
         self.assertIn("change", repaired["_retried_fields"])
 
-    def test_classify_record_confidence_marks_repaired_rows(self) -> None:
-        confidence, notes = extractor.classify_record_confidence(
+    def test_parse_symbol_block_ignores_stale_expiration_prefix(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["May 15 2026", "FDIG", "FIDELITY CRYPTO INDUSTRY AND DIGITAL PAYMENTS ETF"]
+        )
+        self.assertEqual(symbol, "FDIG")
+        self.assertEqual(instrument_type, "equity")
+        self.assertEqual(
+            description,
+            extractor.normalize_description(
+                "FIDELITY CRYPTO INDUSTRY AND DIGITAL PAYMENTS ETF"
+            ),
+        )
+        self.assertEqual(expiration, "")
+
+    def test_parse_symbol_block_prefers_latest_option_candidate(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["GOOGL 325 Put", "GOOGL 315 Put", "GOOGL 340 Call", "Aug 21 2026"]
+        )
+        self.assertEqual(symbol, "GOOGL 340 Call")
+        self.assertEqual(instrument_type, "option")
+        self.assertEqual(expiration, "Aug 21 2026")
+
+    def test_select_symbol_lines_uses_current_row_equity_symbol(self) -> None:
+        symbol, remaining = extractor.select_symbol_lines(
+            ["GOOGL", "ALPHABET INC CAP STK CL A"]
+        )
+        self.assertEqual(symbol, "GOOGL")
+        self.assertEqual(remaining, ["ALPHABET INC CAP STK CL A"])
+
+    def test_validate_cross_field_consistency_rejects_bid_above_ask(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Bid exceeds ask"):
+            extractor.validate_cross_field_consistency(
+                {
+                    "symbol": "UBER",
+                    "bid": "$77.00",
+                    "ask": "$76.00",
+                    "day_range_low": "73.79",
+                    "day_range_high": "77.93",
+                },
+                Path("fixture_input.png"),
+            )
+
+    def test_detect_suspicious_fields_marks_inverted_bid_ask(self) -> None:
+        suspicious = extractor.detect_suspicious_fields(
             {
-                "symbol": "UBER",
-                "last": "$76.72",
-                "change": "+$4.33",
-                "percent_change": "+5.99%",
-                "bid": "$76.50",
-                "ask": "$76.90",
-                "volume": "12,345",
-                "quantity": "100",
-                "day_range_low": "73.79",
-                "day_range_high": "77.93",
-                "_retried_fields": ["bid", "volume"],
+                "last": "$197.78",
+                "bid": "$197.78",
+                "ask": "$107.70",
+                "day_range_low": "195.81",
+                "day_range_high": "199.85",
             }
         )
-
-        self.assertEqual(confidence, "repaired")
-        self.assertIn("repaired:bid,volume", notes)
+        self.assertIn("ask", suspicious)
+        self.assertIn("bid", suspicious)
 
 
 class ExtractorContractTests(unittest.TestCase):
@@ -211,24 +290,23 @@ class ExtractorContractTests(unittest.TestCase):
         self.assertEqual(parsed["week_52_high"], "101.99")
 
     def test_derive_column_ranges_uses_degraded_header_aliases(self) -> None:
-        header_row = [
-            extractor.OcrItem(text="SymDol", x=0.00, y=0.0, width=0.05, height=0.01),
-            extractor.OcrItem(text="Last", x=0.23, y=0.0, width=0.03, height=0.01),
-            extractor.OcrItem(text="Chang", x=0.30, y=0.0, width=0.04, height=0.01),
-            extractor.OcrItem(text="% Change", x=0.36, y=0.0, width=0.05, height=0.01),
-            extractor.OcrItem(text="Act", x=0.43, y=0.0, width=0.03, height=0.01),
-            extractor.OcrItem(text="Ask", x=0.49, y=0.0, width=0.03, height=0.01),
-            extractor.OcrItem(text="Volume", x=0.56, y=0.0, width=0.04, height=0.01),
-            extractor.OcrItem(text="Day range", x=0.61, y=0.0, width=0.05, height=0.01),
-            extractor.OcrItem(text="AVS. COS", x=0.73, y=0.0, width=0.05, height=0.01),
-            extractor.OcrItem(text="Quantity", x=0.81, y=0.0, width=0.05, height=0.01),
-        ]
+        fixture = json.loads((FIXTURES_DIR / "degraded_header.json").read_text(encoding="utf-8"))
+        header_row = [extractor.OcrItem(**item) for item in fixture["header_row"]]
 
         column_ranges = extractor.derive_column_ranges(header_row)
 
         self.assertLess(column_ranges["bid"][0], 0.45)
         self.assertGreater(column_ranges["bid"][1], column_ranges["bid"][0])
         self.assertLess(column_ranges["avg_cost"][0], 0.77)
+
+    def test_validate_image_quality_rejects_too_small_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "small.png"
+            from PIL import Image
+
+            Image.new("RGB", (400, 300), color="white").save(image_path)
+            with self.assertRaisesRegex(extractor.ImageQualityError, "too small"):
+                extractor.validate_image_quality(image_path)
 
     def test_validate_required_fields_raises_for_missing_monitoring_columns(self) -> None:
         record = {

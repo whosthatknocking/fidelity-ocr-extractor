@@ -1,0 +1,27 @@
+{
+  "raw_fields": {
+    "last": "$1.45",
+    "change": "-SO.19",
+    "percent_change": "11 CO0)",
+    "bid": "$1.15",
+    "ask": "$1.45",
+    "volume": "27",
+    "day_range_low": "1.50",
+    "day_range_high": "",
+    "week_52_low": "",
+    "week_52_high": "",
+    "avg_cost": "",
+    "quantity": "-3 M",
+    "total_gl": "",
+    "percent_total_gl": ""
+  },
+  "expected": {
+    "last": "$1.45",
+    "change": "-$0.19",
+    "bid": "$1.15",
+    "ask": "$1.45",
+    "volume": "27",
+    "day_range_low": "1.50",
+    "quantity": "-3"
+  }
+}

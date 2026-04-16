@@ -21,8 +21,6 @@
 - `quantity`: quantity column as captured from OCR.
 - `total_gl`: total gain/loss column.
 - `percent_total_gl`: total gain/loss percent column.
-- `row_confidence`: extraction confidence classification. `ok`, `repaired`, or `low`.
-- `review_notes`: compact OCR review notes, including repaired or suspicious fields.
 
 Required for every extracted monitoring row:
 

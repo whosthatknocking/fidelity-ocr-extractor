@@ -27,9 +27,10 @@ Behavior:
 - output files are named like `positions_monitoring_<timestamp>.csv`
 - `created_at` is derived from the PNG creation time when available
 - the extractor calibrates column positions from the detected monitoring header so browser-size changes do not require a fixed screenshot resolution
+- screenshots must pass basic quality gates for size, contrast, and recognizable header anchors before extraction runs
 - `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, `quantity`, `day_range_low`, and `day_range_high` are required; unsupported screenshots fail clearly instead of writing partial rows
 - `week_52_low` and `week_52_high` are extracted when present, but they may be blank on screenshots where that range is not visible
-- each row now includes `row_confidence` (`ok`, `repaired`, or `low`) and `review_notes` so OCR repairs remain visible for manual review
+- extraction separates raw OCR collection from normalization and validation, and ambiguous rows fail instead of being exported as low confidence
 - `input/` and generated CSV files are gitignored to reduce accidental commits of private data
 
 ## View CSVs
@@ -71,4 +72,4 @@ fidelity-extractor viewer --open
 
 ## Current Scope
 
-Only the Fidelity Trader+ positions `monitoring` view is supported right now. OCR output is usable for the sample screenshot, but some cells may still need manual review when the screenshot quality is poor.
+Only the Fidelity Trader+ positions `monitoring` view is supported right now. Screenshots that cannot be extracted reliably are rejected instead of being emitted with low-confidence data.
