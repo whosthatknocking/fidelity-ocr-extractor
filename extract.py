@@ -95,8 +95,12 @@ class OcrItem:
     def center_y(self) -> float:
         return self.y + (self.height / 2)
 
+    @property
+    def center_x(self) -> float:
+        return self.x + (self.width / 2)
 
-COLUMN_RANGES = {
+
+DEFAULT_COLUMN_RANGES = {
     "last": (0.20, 0.28),
     "change": (0.28, 0.34),
     "percent_change": (0.34, 0.40),
@@ -111,6 +115,22 @@ COLUMN_RANGES = {
     "quantity": (0.79, 0.86),
     "total_gl": (0.86, 0.94),
     "percent_total_gl": (0.94, 1.01),
+}
+
+DEFAULT_HEADER_CENTERS = {
+    "symbol": 0.10,
+    "last": 0.24,
+    "change": 0.31,
+    "percent_change": 0.37,
+    "bid": 0.43,
+    "ask": 0.49,
+    "volume": 0.545,
+    "day_range": 0.6025,
+    "week_52_range": 0.6725,
+    "avg_cost": 0.75,
+    "quantity": 0.825,
+    "total_gl": 0.90,
+    "percent_total_gl": 0.975,
 }
 
 OUTPUT_FIELDS = [
@@ -158,33 +178,31 @@ EXACT_TEXT_FIXES = {
 }
 
 CELL_REPAIR_ATTEMPTS = {
-    "quantity": [
-        (0.77, 0.87, 8, None),
-        (0.76, 0.90, 12, 120),
-    ],
-    "volume": [
-        (0.52, 0.57, 10, None),
-        (0.52, 0.57, 10, 120),
-    ],
-    "percent_change": [
-        (0.34, 0.40, 10, None),
-    ],
-    "change": [
-        (0.28, 0.34, 10, None),
-    ],
-    "day_range_low": [
-        (0.57, 0.605, 10, None),
-    ],
-    "day_range_high": [
-        (0.605, 0.635, 10, None),
-    ],
-    "week_52_low": [
-        (0.635, 0.665, 10, None),
-    ],
-    "week_52_high": [
-        (0.665, 0.71, 10, None),
-    ],
+    "last": [(1.15, 10, None), (1.25, 12, 140)],
+    "bid": [(1.15, 10, None), (1.25, 12, 140)],
+    "ask": [(1.15, 10, None), (1.25, 12, 140)],
+    "quantity": [(1.9, 8, None), (2.4, 12, 120), (2.8, 14, None)],
+    "volume": [(1.2, 10, None), (1.2, 10, 120)],
+    "percent_change": [(1.15, 10, None)],
+    "change": [(1.15, 10, None)],
+    "day_range_low": [(1.1, 10, None)],
+    "day_range_high": [(1.1, 10, None)],
+    "week_52_low": [(1.1, 10, None)],
+    "week_52_high": [(1.1, 10, None)],
 }
+
+REQUIRED_FIELDS = [
+    "symbol",
+    "last",
+    "change",
+    "percent_change",
+    "bid",
+    "ask",
+    "volume",
+    "quantity",
+    "day_range_low",
+    "day_range_high",
+]
 
 
 def run_vision_ocr(image_path: Path) -> list[OcrItem]:
@@ -256,15 +274,111 @@ def clean_text(text: str) -> str:
 
 
 def items_in_range(items: list[OcrItem], left: float, right: float) -> list[OcrItem]:
-    return [item for item in items if left <= item.x < right]
+    return [item for item in items if left <= item.center_x < right]
 
 
 def join_items(items: list[OcrItem]) -> str:
     return clean_text(" ".join(item.text for item in sorted(items, key=lambda entry: entry.x)))
 
 
-def extract_symbol_lines(row: list[OcrItem], threshold: float = 0.012) -> list[str]:
-    left_items = [item for item in row if item.x < 0.20]
+def expand_range(bounds: tuple[float, float], factor: float) -> tuple[float, float]:
+    left, right = bounds
+    center = (left + right) / 2
+    half_width = ((right - left) * factor) / 2
+    return max(0.0, center - half_width), min(1.0, center + half_width)
+
+
+def map_coordinate(x_value: float, anchors: dict[str, float]) -> float:
+    points = [(0.0, 0.0)]
+    for name, default_center in sorted(DEFAULT_HEADER_CENTERS.items(), key=lambda item: item[1]):
+        observed = anchors.get(name)
+        if observed is not None:
+            points.append((default_center, observed))
+    points.append((1.0, 1.0))
+
+    deduped: list[tuple[float, float]] = []
+    for default_x, observed_x in points:
+        if deduped and abs(default_x - deduped[-1][0]) < 1e-6:
+            deduped[-1] = (default_x, observed_x)
+            continue
+        deduped.append((default_x, observed_x))
+
+    points = deduped
+    if x_value <= points[0][0]:
+        return points[0][1]
+    if x_value >= points[-1][0]:
+        return points[-1][1]
+
+    for (left_default, left_observed), (right_default, right_observed) in zip(points, points[1:]):
+        if left_default <= x_value <= right_default:
+            if abs(right_default - left_default) < 1e-6:
+                return right_observed
+            ratio = (x_value - left_default) / (right_default - left_default)
+            return left_observed + ratio * (right_observed - left_observed)
+
+    return x_value
+
+
+def derive_column_ranges(header_row: list[OcrItem] | None) -> dict[str, tuple[float, float]]:
+    if not header_row:
+        return dict(DEFAULT_COLUMN_RANGES)
+
+    anchors: dict[str, float] = {}
+    ordered = sorted(header_row, key=lambda entry: entry.x)
+    for index, item in enumerate(ordered):
+        text = clean_text(item.text).lower()
+        previous_text = clean_text(ordered[index - 1].text).lower() if index > 0 else ""
+        next_text = clean_text(ordered[index + 1].text).lower() if index + 1 < len(ordered) else ""
+        item_center = item.x + (item.width / 2)
+
+        if "symbol" in text:
+            anchors["symbol"] = item_center
+        elif "last" in text:
+            anchors["last"] = item_center
+        elif "bid" in text:
+            anchors["bid"] = item_center
+        elif "ask" in text:
+            anchors["ask"] = item_center
+        elif "volume" in text:
+            anchors["volume"] = item_center
+        elif "quantity" in text:
+            anchors["quantity"] = item_center
+        elif "avg" in text and "cost" in text:
+            anchors["avg_cost"] = item_center
+        elif "day" in text:
+            anchors["day_range"] = item_center
+        elif "52" in text or "week" in text:
+            anchors["week_52_range"] = item_center
+        elif "total" in text and "%" in text:
+            anchors["percent_total_gl"] = item_center
+        elif "total" in text:
+            anchors["total_gl"] = item_center
+        elif "%" in text and "change" in text:
+            anchors["percent_change"] = item_center
+        elif "%" in text and "change" in next_text:
+            next_item = ordered[index + 1]
+            anchors["percent_change"] = (item.x + (next_item.x + next_item.width)) / 2
+        elif "change" in text and "%" in previous_text:
+            if "percent_change" not in anchors:
+                previous = ordered[index - 1]
+                anchors["percent_change"] = (previous.x + (item.x + item.width)) / 2
+        elif "change" in text:
+            anchors["change"] = item_center
+
+    derived: dict[str, tuple[float, float]] = {}
+    for name, (left, right) in DEFAULT_COLUMN_RANGES.items():
+        mapped_left = map_coordinate(left, anchors)
+        mapped_right = map_coordinate(right, anchors)
+        derived[name] = (mapped_left, max(mapped_left, mapped_right))
+    return derived
+
+
+def extract_symbol_lines(
+    row: list[OcrItem],
+    symbol_right_boundary: float,
+    threshold: float = 0.012,
+) -> list[str]:
+    left_items = [item for item in row if item.center_x < symbol_right_boundary]
     if not left_items:
         return []
 
@@ -297,18 +411,20 @@ def is_header_row(row: list[OcrItem]) -> bool:
     return "Symbol" in text and "Last" in text and "Quantity" in text
 
 
-def is_main_data_row(row: list[OcrItem]) -> bool:
+def is_main_data_row(row: list[OcrItem], column_ranges: dict[str, tuple[float, float]]) -> bool:
     populated = 0
-    for left, right in COLUMN_RANGES.values():
+    for left, right in column_ranges.values():
         if join_items(items_in_range(row, left, right)):
             populated += 1
     return populated >= 8
 
 
-def is_range_row(row: list[OcrItem]) -> bool:
-    if any(item.x >= 0.71 for item in row):
+def is_range_row(row: list[OcrItem], column_ranges: dict[str, tuple[float, float]]) -> bool:
+    if any(item.center_x >= column_ranges["avg_cost"][0] for item in row):
         return False
-    range_items = [item for item in row if 0.57 <= item.x < 0.71]
+    range_left = column_ranges["day_range_low"][0]
+    range_right = column_ranges["week_52_high"][1]
+    range_items = [item for item in row if range_left <= item.center_x < range_right]
     if len(range_items) < 3:
         return False
     return all(looks_numeric(item.text) for item in range_items)
@@ -397,6 +513,8 @@ def normalize_range_text(text: str) -> str:
             return whole
         if len(frac) == 1:
             frac = f"{frac}0"
+        elif len(frac) > 2:
+            frac = frac[:2]
         return f"{whole}.{frac}"
 
     return cleaned
@@ -444,9 +562,13 @@ def parse_symbol_block(lines: list[str]) -> tuple[str, str, str, str]:
     return first, "equity", description, ""
 
 
-def parse_main_row(row: list[OcrItem]) -> dict[str, str]:
+def parse_main_row(
+    row: list[OcrItem],
+    column_ranges: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, str]:
+    active_ranges = column_ranges or DEFAULT_COLUMN_RANGES
     parsed: dict[str, str] = {}
-    for name, (left, right) in COLUMN_RANGES.items():
+    for name, (left, right) in active_ranges.items():
         parsed[name] = join_items(items_in_range(row, left, right))
 
     total_gl = parsed.get("total_gl", "")
@@ -467,10 +589,14 @@ def parse_main_row(row: list[OcrItem]) -> dict[str, str]:
     return parsed
 
 
-def attach_range_row(record: dict[str, str], row: list[OcrItem]) -> None:
+def attach_range_row(
+    record: dict[str, str],
+    row: list[OcrItem],
+    column_ranges: dict[str, tuple[float, float]],
+) -> None:
     for name in ("day_range_low", "day_range_high", "week_52_low", "week_52_high"):
-        left, right = COLUMN_RANGES[name]
-        record[name] = join_items(items_in_range(row, left, right))
+        left, right = column_ranges[name]
+        record[name] = normalize_range_text(join_items(items_in_range(row, left, right)))
 
 
 def image_created_at(image_path: Path) -> datetime:
@@ -494,8 +620,11 @@ def read_existing_image_file(csv_path: Path) -> str | None:
 
 
 def row_pixel_bounds(row: list[OcrItem], image_height: int) -> tuple[int, int]:
-    top = max(0, int(min((1 - (item.y + item.height)) * image_height for item in row)) - 4)
-    bottom = min(image_height, int(max((1 - item.y) * image_height for item in row)) + 4)
+    raw_top = int(min((1 - (item.y + item.height)) * image_height for item in row))
+    raw_bottom = int(max((1 - item.y) * image_height for item in row))
+    padding = max(4, int((raw_bottom - raw_top) * 0.35))
+    top = max(0, raw_top - padding)
+    bottom = min(image_height, raw_bottom + padding)
     return top, bottom
 
 
@@ -632,15 +761,19 @@ def repair_record_from_image_crop(
     image: Image.Image,
     row: list[OcrItem],
     record: dict[str, str],
+    column_ranges: dict[str, tuple[float, float]],
 ) -> dict[str, str]:
-    left_items = crop_ocr_items(image, row, 0.0, 0.20, scale=10)
+    symbol_right_boundary = min(column_ranges["last"][0], 0.30)
+    left_items = crop_ocr_items(image, row, 0.0, symbol_right_boundary, scale=10)
     left_lines = lines_from_crop_items(left_items)
 
     field_texts: dict[str, list[str]] = {}
     for field_name, attempts in CELL_REPAIR_ATTEMPTS.items():
         if record.get(field_name) and field_name != "quantity":
             continue
-        for left, right, scale, threshold in attempts:
+        base_bounds = column_ranges[field_name]
+        for factor, scale, threshold in attempts:
+            left, right = expand_range(base_bounds, factor)
             crop_items = crop_ocr_items(image, row, left, right, scale=scale, threshold=threshold)
             texts = [item.text for item in crop_items]
             if extract_best_field_value(field_name, texts):
@@ -648,7 +781,7 @@ def repair_record_from_image_crop(
                 break
 
     if "quantity" not in field_texts:
-        quantity_left, quantity_right = COLUMN_RANGES["quantity"]
+        quantity_left, quantity_right = column_ranges["quantity"]
         raw_quantity_texts = [item.text for item in items_in_range(row, quantity_left, quantity_right)]
         if extract_best_field_value("quantity", raw_quantity_texts):
             field_texts["quantity"] = raw_quantity_texts
@@ -656,9 +789,34 @@ def repair_record_from_image_crop(
     return repair_record_from_crop_texts(record, left_lines, field_texts)
 
 
+def validate_required_fields(record: dict[str, str], image_path: Path) -> None:
+    missing_fields = [field_name for field_name in REQUIRED_FIELDS if not record.get(field_name)]
+    if missing_fields:
+        raise ValueError(
+            f"Missing required monitoring fields for {image_path.name}: {', '.join(missing_fields)}"
+        )
+
+
+def finalize_record(record: dict[str, str] | None, image_path: Path) -> dict[str, str] | None:
+    if record is None:
+        return None
+    validate_required_fields(record, image_path)
+    return record
+
+
+def detect_header_row(rows: list[list[OcrItem]]) -> list[OcrItem] | None:
+    for row in rows:
+        if is_header_row(row):
+            return row
+    return None
+
+
 def build_records(image_path: Path) -> list[dict[str, str]]:
     items = run_vision_ocr(image_path)
     rows = group_rows(items)
+    header_row = detect_header_row(rows)
+    column_ranges = derive_column_ranges(header_row)
+    symbol_right_boundary = min(column_ranges["last"][0], 0.30)
     created_at = image_created_at(image_path).isoformat(timespec="seconds")
 
     records: list[dict[str, str]] = []
@@ -670,10 +828,10 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
             if is_header_row(row):
                 continue
 
-            left_lines = extract_symbol_lines(row)
-            if is_main_data_row(row):
+            left_lines = extract_symbol_lines(row, symbol_right_boundary)
+            if is_main_data_row(row, column_ranges):
                 if current_record is not None:
-                    records.append(current_record)
+                    records.append(finalize_record(current_record, image_path))
 
                 pending_symbol_lines.extend(left_lines)
                 symbol, instrument_type, description, expiration = parse_symbol_block(
@@ -687,25 +845,26 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                     "instrument_type": instrument_type,
                     "description": description,
                     "expiration": expiration,
-                    **parse_main_row(row),
+                    **parse_main_row(row, column_ranges),
                 }
                 current_record = repair_record_from_image_crop(
                     image=image,
                     row=row,
                     record=current_record,
+                    column_ranges=column_ranges,
                 )
                 pending_symbol_lines = []
                 continue
 
-            if is_range_row(row):
+            if is_range_row(row, column_ranges):
                 if current_record is not None:
-                    attach_range_row(current_record, row)
+                    attach_range_row(current_record, row, column_ranges)
                 continue
 
             pending_symbol_lines.extend(left_lines)
 
     if current_record is not None:
-        records.append(current_record)
+        records.append(finalize_record(current_record, image_path))
 
     return records
 

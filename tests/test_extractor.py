@@ -195,6 +195,24 @@ class ExtractorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "volume, quantity"):
             extractor.validate_required_fields(record, Path("fixture_input.png"))
 
+    def test_validate_required_fields_allows_missing_52_week_range(self) -> None:
+        record = {
+            "symbol": "UBER",
+            "last": "$76.72",
+            "change": "+$4.33",
+            "percent_change": "+5.99%",
+            "bid": "$76.50",
+            "ask": "$76.90",
+            "volume": "12,345",
+            "quantity": "100",
+            "day_range_low": "73.79",
+            "day_range_high": "77.93",
+            "week_52_low": "",
+            "week_52_high": "",
+        }
+
+        extractor.validate_required_fields(record, Path("fixture_input.png"))
+
     def test_timestamp_only_output_filename(self) -> None:
         file_name = extractor.csv_name(sample_created_at())
         self.assertTrue(file_name.startswith("positions_monitoring_"))

@@ -25,3 +25,6 @@
 - The CSV schema is fixed to the current monitoring fields emitted by `extract.py`.
 - `created_at` must come from the PNG creation time when available.
 - Re-running the extractor must check every file in `input/` and skip only when the deterministic output file already exists.
+- Extraction must adapt to browser-size and screenshot-resolution changes by calibrating column positions from the detected monitoring header row.
+- `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, `quantity`, `day_range_low`, and `day_range_high` are required monitoring fields and must not be emitted as blank values.
+- `week_52_low` and `week_52_high` remain part of the CSV schema but may be blank when that range is not visible in the screenshot.

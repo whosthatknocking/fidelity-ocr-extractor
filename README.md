@@ -26,6 +26,9 @@ Behavior:
 - if the deterministic output CSV already exists, that PNG is skipped
 - output files are named like `positions_monitoring_<timestamp>.csv`
 - `created_at` is derived from the PNG creation time when available
+- the extractor calibrates column positions from the detected monitoring header so browser-size changes do not require a fixed screenshot resolution
+- `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, `quantity`, `day_range_low`, and `day_range_high` are required; unsupported screenshots fail clearly instead of writing partial rows
+- `week_52_low` and `week_52_high` are extracted when present, but they may be blank on screenshots where that range is not visible
 - `input/` and generated CSV files are gitignored to reduce accidental commits of private data
 
 ## View CSVs

@@ -21,3 +21,20 @@
 - `quantity`: quantity column as captured from OCR.
 - `total_gl`: total gain/loss column.
 - `percent_total_gl`: total gain/loss percent column.
+
+Required for every extracted monitoring row:
+
+- `symbol`
+- `last`
+- `change`
+- `percent_change`
+- `bid`
+- `ask`
+- `volume`
+- `quantity`
+- `day_range_low`
+- `day_range_high`
+Optional when the 52-week range is not visible in the screenshot:
+
+- `week_52_low`
+- `week_52_high`
