@@ -222,6 +222,11 @@ REQUIRED_FIELDS = [
     "day_range_high",
 ]
 
+MONEY_FIELDS = {"last", "bid", "ask", "avg_cost", "total_gl", "change"}
+PERCENT_FIELDS = {"percent_change", "percent_total_gl"}
+INTEGER_FIELDS = {"volume", "quantity"}
+RANGE_FIELDS = {"day_range_low", "day_range_high", "week_52_low", "week_52_high"}
+
 
 def run_vision_ocr(image_path: Path) -> list[OcrItem]:
     result = subprocess.run(
@@ -551,6 +556,103 @@ def normalize_percent_text(text: str, *, paired_amount: str = "") -> str:
     return f"{sign}{number_text}%"
 
 
+def normalize_money_text(text: str) -> str:
+    cleaned = clean_text(text).replace(" ", "").replace(",", "")
+    if not cleaned:
+        return ""
+
+    sign = ""
+    if cleaned[0] in "+-":
+        sign = cleaned[0]
+        cleaned = cleaned[1:]
+
+    cleaned = cleaned.replace("$", "")
+    cleaned = re.sub(r"[^0-9.]", "", cleaned)
+    if not cleaned:
+        return ""
+
+    if cleaned.count(".") > 1:
+        head, *tail = cleaned.split(".")
+        cleaned = head + "." + "".join(tail)
+
+    if "." not in cleaned:
+        digits = cleaned
+        if len(digits) >= 3:
+            cleaned = f"{digits[:-2]}.{digits[-2:]}"
+        elif len(digits) == 2:
+            cleaned = f"0.{digits}"
+        elif len(digits) == 1:
+            cleaned = f"0.0{digits}"
+    else:
+        whole, frac = cleaned.split(".", 1)
+        frac = re.sub(r"[^0-9]", "", frac)
+        if not frac:
+            frac = "00"
+        elif len(frac) == 1:
+            frac = f"{frac}0"
+        elif len(frac) > 2:
+            frac = frac[:2]
+        cleaned = f"{whole or '0'}.{frac}"
+
+    prefix = "$" if cleaned else ""
+    return f"{sign}{prefix}{cleaned}"
+
+
+def normalize_integer_text(text: str, *, signed: bool = False) -> str:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return ""
+
+    negative_hint = "•" in text or "-" in cleaned
+    compact = re.sub(r"(?<=\d)[.\s](?=\d)", ",", cleaned)
+    compact = re.sub(r"[^0-9,\-]", "", compact)
+    candidates = re.findall(r"\d[\d,]*", compact)
+    if not candidates:
+        return ""
+    best = max(candidates, key=len)
+    if signed and negative_hint:
+        return f"-{best}"
+    return best
+
+
+def normalize_field_value(field_name: str, text: str, *, paired_amount: str = "") -> str:
+    if field_name in MONEY_FIELDS:
+        return normalize_money_text(text)
+    if field_name in PERCENT_FIELDS:
+        return normalize_percent_text(text, paired_amount=paired_amount)
+    if field_name in RANGE_FIELDS:
+        return normalize_range_text(text)
+    if field_name == "quantity":
+        return normalize_integer_text(text, signed=True)
+    if field_name == "volume":
+        return normalize_integer_text(text, signed=False)
+    return clean_text(text)
+
+
+def is_valid_field_value(field_name: str, value: str) -> bool:
+    if not value:
+        return False
+    if field_name in MONEY_FIELDS:
+        return bool(re.fullmatch(r"[+-]?\$?\d+(?:\.\d{2})?", value))
+    if field_name in PERCENT_FIELDS:
+        return bool(re.fullmatch(r"[+-]?\d+(?:\.\d{1,2})?%", value))
+    if field_name == "volume":
+        return bool(re.fullmatch(r"\d[\d,]*", value))
+    if field_name == "quantity":
+        return bool(re.fullmatch(r"-?\d[\d,]*", value))
+    if field_name in RANGE_FIELDS:
+        return bool(re.fullmatch(r"\d+(?:\.\d{1,2})?", value))
+    return True
+
+
+def field_needs_retry(field_name: str, value: str) -> bool:
+    if field_name in REQUIRED_FIELDS and not value:
+        return True
+    if not value:
+        return False
+    return not is_valid_field_value(field_name, value)
+
+
 def normalize_range_text(text: str) -> str:
     cleaned = clean_text(text)
     if not cleaned:
@@ -708,12 +810,14 @@ def crop_ocr_items(
     right: float,
     scale: int = 10,
     threshold: int | None = None,
+    variant: str = "grayscale",
 ) -> list[OcrItem]:
     width, height = image.size
     top, bottom = row_pixel_bounds(row, height)
     crop_left = max(0, int(left * width) - 4)
     crop_right = min(width, int(right * width) + 4)
-    crop = image.crop((crop_left, top, crop_right, bottom)).convert("L")
+    crop = image.crop((crop_left, top, crop_right, bottom))
+    crop = preprocess_for_ocr(crop, variant)
     if threshold is not None:
         crop = crop.point(lambda pixel: 255 if pixel > threshold else 0)
     crop = crop.resize((max(1, (crop_right - crop_left) * scale), max(1, (bottom - top) * scale)))
@@ -726,6 +830,30 @@ def crop_ocr_items(
     finally:
         if temp_path.exists():
             os.unlink(temp_path)
+
+
+def collect_cell_texts(
+    image: Image.Image,
+    row: list[OcrItem],
+    bounds: tuple[float, float],
+    attempts: list[tuple[float, int, int | None]] | None = None,
+) -> list[str]:
+    texts: list[str] = []
+    planned_attempts = attempts or [(1.0, 8, None), (1.15, 10, 160)]
+    for factor, scale, threshold in planned_attempts:
+        left, right = expand_range(bounds, factor)
+        for variant in ("grayscale", "contrast", "binary"):
+            crop_items = crop_ocr_items(
+                image,
+                row,
+                left,
+                right,
+                scale=scale,
+                threshold=threshold,
+                variant=variant,
+            )
+            texts.extend(item.text for item in crop_items)
+    return texts
 
 
 def lines_from_crop_items(items: list[OcrItem]) -> list[str]:
@@ -808,17 +936,31 @@ def repair_record_from_crop_texts(
         repaired["expiration"] = expiration
 
     if repaired.get("quantity"):
-        normalized_quantity = extract_best_field_value("quantity", [repaired["quantity"]])
+        normalized_quantity = normalize_field_value("quantity", repaired["quantity"])
         if normalized_quantity:
             repaired["quantity"] = normalized_quantity
 
     for field_name, texts in field_texts.items():
-        if repaired.get(field_name) and field_name != "quantity":
+        if repaired.get(field_name) and field_name != "quantity" and not field_needs_retry(
+            field_name, repaired.get(field_name, "")
+        ):
             continue
         candidate = extract_best_field_value(field_name, texts)
         if candidate:
-            repaired[field_name] = candidate
+            repaired[field_name] = normalize_field_value(
+                field_name,
+                candidate,
+                paired_amount=repaired.get("total_gl", ""),
+            )
 
+    repaired["last"] = normalize_field_value("last", repaired.get("last", ""))
+    repaired["change"] = normalize_field_value("change", repaired.get("change", ""))
+    repaired["bid"] = normalize_field_value("bid", repaired.get("bid", ""))
+    repaired["ask"] = normalize_field_value("ask", repaired.get("ask", ""))
+    repaired["avg_cost"] = normalize_field_value("avg_cost", repaired.get("avg_cost", ""))
+    repaired["total_gl"] = normalize_field_value("total_gl", repaired.get("total_gl", ""))
+    repaired["volume"] = normalize_field_value("volume", repaired.get("volume", ""))
+    repaired["quantity"] = normalize_field_value("quantity", repaired.get("quantity", ""))
     repaired["percent_change"] = normalize_percent_text(repaired.get("percent_change", ""))
     repaired["percent_total_gl"] = normalize_percent_text(
         repaired.get("percent_total_gl", ""),
@@ -837,27 +979,30 @@ def repair_record_from_image_crop(
     column_ranges: dict[str, tuple[float, float]],
 ) -> dict[str, str]:
     symbol_right_boundary = min(column_ranges["last"][0], 0.30)
-    left_items = crop_ocr_items(image, row, 0.0, symbol_right_boundary, scale=10)
-    left_lines = lines_from_crop_items(left_items)
+    left_lines: list[str] = []
+    for variant in ("grayscale", "contrast", "binary"):
+        left_items = crop_ocr_items(
+            image, row, 0.0, symbol_right_boundary, scale=10, variant=variant
+        )
+        left_lines.extend(lines_from_crop_items(left_items))
 
     field_texts: dict[str, list[str]] = {}
-    for field_name, attempts in CELL_REPAIR_ATTEMPTS.items():
-        if record.get(field_name) and field_name != "quantity":
+    for field_name, bounds in column_ranges.items():
+        existing_value = normalize_field_value(
+            field_name,
+            record.get(field_name, ""),
+            paired_amount=record.get("total_gl", ""),
+        )
+        record[field_name] = existing_value
+        if not field_needs_retry(field_name, existing_value):
             continue
-        base_bounds = column_ranges[field_name]
-        for factor, scale, threshold in attempts:
-            left, right = expand_range(base_bounds, factor)
-            crop_items = crop_ocr_items(image, row, left, right, scale=scale, threshold=threshold)
-            texts = [item.text for item in crop_items]
-            if extract_best_field_value(field_name, texts):
-                field_texts[field_name] = texts
-                break
 
-    if "quantity" not in field_texts:
-        quantity_left, quantity_right = column_ranges["quantity"]
-        raw_quantity_texts = [item.text for item in items_in_range(row, quantity_left, quantity_right)]
-        if extract_best_field_value("quantity", raw_quantity_texts):
-            field_texts["quantity"] = raw_quantity_texts
+        attempts = CELL_REPAIR_ATTEMPTS.get(field_name, [(1.0, 8, None), (1.15, 10, 160)])
+        raw_texts = [item.text for item in items_in_range(row, bounds[0], bounds[1])]
+        texts = list(raw_texts)
+        texts.extend(collect_cell_texts(image, row, bounds, attempts))
+        if texts:
+            field_texts[field_name] = texts
 
     return repair_record_from_crop_texts(record, left_lines, field_texts)
 

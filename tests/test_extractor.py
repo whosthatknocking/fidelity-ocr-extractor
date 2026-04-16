@@ -35,6 +35,13 @@ class ExtractorHelperTests(unittest.TestCase):
             "28.00",
         )
 
+    def test_money_and_integer_normalizers_repair_ocr_noise(self) -> None:
+        self.assertEqual(extractor.normalize_money_text("S0K6"), "$0.06")
+        self.assertEqual(extractor.normalize_money_text("-$2 281.50"), "-$2281.50")
+        self.assertEqual(extractor.normalize_integer_text("3.191 887"), "3,191,887")
+        self.assertTrue(extractor.field_needs_retry("bid", "Act"))
+        self.assertFalse(extractor.field_needs_retry("bid", "$64.83"))
+
     def test_percent_normalization_repairs_missing_decimal_and_sign(self) -> None:
         self.assertEqual(extractor.normalize_percent_text("+599%"), "+5.99%")
         self.assertEqual(extractor.normalize_percent_text("+179 94%"), "+179.94%")
