@@ -29,6 +29,7 @@ Behavior:
 - the extractor calibrates column positions from the detected monitoring header so browser-size changes do not require a fixed screenshot resolution
 - `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, `quantity`, `day_range_low`, and `day_range_high` are required; unsupported screenshots fail clearly instead of writing partial rows
 - `week_52_low` and `week_52_high` are extracted when present, but they may be blank on screenshots where that range is not visible
+- each row now includes `row_confidence` (`ok`, `repaired`, or `low`) and `review_notes` so OCR repairs remain visible for manual review
 - `input/` and generated CSV files are gitignored to reduce accidental commits of private data
 
 ## View CSVs

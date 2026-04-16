@@ -173,6 +173,8 @@ OUTPUT_FIELDS = [
     "quantity",
     "total_gl",
     "percent_total_gl",
+    "row_confidence",
+    "review_notes",
 ]
 
 MONTH_FIXES = {
@@ -922,6 +924,7 @@ def repair_record_from_crop_texts(
     field_texts: dict[str, list[str]],
 ) -> dict[str, str]:
     repaired = dict(record)
+    retried_fields = set(repaired.get("_retried_fields", []))
 
     symbol, instrument_type, description, expiration = parse_symbol_block(left_lines)
     if symbol:
@@ -952,6 +955,7 @@ def repair_record_from_crop_texts(
                 candidate,
                 paired_amount=repaired.get("total_gl", ""),
             )
+            retried_fields.add(field_name)
 
     repaired["last"] = normalize_field_value("last", repaired.get("last", ""))
     repaired["change"] = normalize_field_value("change", repaired.get("change", ""))
@@ -968,6 +972,8 @@ def repair_record_from_crop_texts(
     )
     for field_name in ("day_range_low", "day_range_high", "week_52_low", "week_52_high"):
         repaired[field_name] = normalize_range_text(repaired.get(field_name, ""))
+
+    repaired["_retried_fields"] = sorted(retried_fields)
 
     return repaired
 
@@ -1015,11 +1021,35 @@ def validate_required_fields(record: dict[str, str], image_path: Path) -> None:
         )
 
 
+def classify_record_confidence(record: dict[str, str]) -> tuple[str, str]:
+    retried_fields = [field for field in record.get("_retried_fields", []) if field]
+    invalid_fields = [
+        field_name
+        for field_name in REQUIRED_FIELDS
+        if record.get(field_name) and not is_valid_field_value(field_name, record.get(field_name, ""))
+    ]
+
+    notes: list[str] = []
+    if retried_fields:
+        notes.append(f"repaired:{','.join(retried_fields)}")
+    if invalid_fields:
+        notes.append(f"invalid:{','.join(invalid_fields)}")
+        return "low", "; ".join(notes)
+    if retried_fields:
+        return "repaired", "; ".join(notes)
+    return "ok", ""
+
+
 def finalize_record(record: dict[str, str] | None, image_path: Path) -> dict[str, str] | None:
     if record is None:
         return None
     validate_required_fields(record, image_path)
-    return record
+    confidence, notes = classify_record_confidence(record)
+    finalized = dict(record)
+    finalized["row_confidence"] = confidence
+    finalized["review_notes"] = notes
+    finalized.pop("_retried_fields", None)
+    return finalized
 
 
 def detect_header_row(rows: list[list[OcrItem]]) -> list[OcrItem] | None:

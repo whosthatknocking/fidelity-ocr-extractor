@@ -103,6 +103,27 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(repaired["change"], "+$1.96")
         self.assertEqual(repaired["day_range_low"], "2.62")
         self.assertEqual(repaired["week_52_high"], "28.00")
+        self.assertIn("change", repaired["_retried_fields"])
+
+    def test_classify_record_confidence_marks_repaired_rows(self) -> None:
+        confidence, notes = extractor.classify_record_confidence(
+            {
+                "symbol": "UBER",
+                "last": "$76.72",
+                "change": "+$4.33",
+                "percent_change": "+5.99%",
+                "bid": "$76.50",
+                "ask": "$76.90",
+                "volume": "12,345",
+                "quantity": "100",
+                "day_range_low": "73.79",
+                "day_range_high": "77.93",
+                "_retried_fields": ["bid", "volume"],
+            }
+        )
+
+        self.assertEqual(confidence, "repaired")
+        self.assertIn("repaired:bid,volume", notes)
 
 
 class ExtractorContractTests(unittest.TestCase):

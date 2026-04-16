@@ -23,6 +23,7 @@
 - Only PNG files inside `input/` are eligible for extraction.
 - Output filenames must start with `positions_monitoring_` and use only the derived timestamp as the suffix.
 - The CSV schema is fixed to the current monitoring fields emitted by `extract.py`.
+- Exported rows include OCR review metadata: `row_confidence` and `review_notes`.
 - `created_at` must come from the PNG creation time when available.
 - Re-running the extractor must check every file in `input/` and skip only when the deterministic output file already exists.
 - Extraction must adapt to browser-size and screenshot-resolution changes by calibrating column positions from the detected monitoring header row.

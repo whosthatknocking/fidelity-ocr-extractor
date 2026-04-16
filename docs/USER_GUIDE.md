@@ -16,6 +16,7 @@ Notes:
 - The parser calibrates itself from the monitoring header row, so the browser window can be wider or narrower without needing a single fixed screenshot size.
 - If the screenshot does not expose the required monitoring columns clearly enough to recover `symbol`, `last`, `change`, `% change`, `bid`, `ask`, `volume`, `quantity`, and `day range`, extraction fails instead of writing partial data.
 - `52-week range` is extracted when visible, but missing `week_52_low` and `week_52_high` do not fail extraction.
+- Check `row_confidence` and `review_notes` in the CSV when you want to identify rows that were repaired or still deserve manual review.
 
 ## Install dependencies
 
