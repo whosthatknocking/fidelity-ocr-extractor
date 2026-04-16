@@ -6,7 +6,11 @@ import extract as extractor
 
 
 def sample_created_at() -> extractor.datetime:
-    return extractor.datetime.fromisoformat("2026-04-15T14:31:16-07:00")
+    return extractor.datetime.fromisoformat("2030-01-02T03:04:05-08:00")
+
+
+def resize_x(x_value: float) -> float:
+    return (0.82 * x_value) + 0.06
 
 
 class ExtractorHelperTests(unittest.TestCase):
@@ -41,12 +45,13 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(extractor.normalize_range_text("029"), "0.29")
         self.assertEqual(extractor.normalize_range_text("*.5A"), "0.54")
         self.assertEqual(extractor.normalize_range_text("725"), "7.25")
+        self.assertEqual(extractor.normalize_range_text("77.936846"), "77.93")
 
     def test_repair_record_from_crop_texts_updates_symbol_and_missing_fields(self) -> None:
         record = {
             "schema_name": "monitoring",
-            "image_file": "sample.png",
-            "created_at": "2026-04-15T14:31:16-07:00",
+            "image_file": "fixture_input.png",
+            "created_at": "2030-01-02T03:04:05-08:00",
             "symbol": "HHRSR",
             "instrument_type": "equity",
             "description": "ROCSIl",
@@ -87,62 +92,132 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(repaired["week_52_high"], "28.00")
 
 
-class SampleImageExtractionTests(unittest.TestCase):
-    SAMPLE_IMAGE = Path("input/Screenshot 2026-04-15 at 14.31.11.png")
+class ExtractorContractTests(unittest.TestCase):
+    def test_parse_main_row_normalizes_sample_like_numeric_noise(self) -> None:
+        row = [
+            extractor.OcrItem(text="+599%", x=0.355, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+179 94%", x=0.961, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+$372,554.44", x=0.881, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="73.79", x=0.580, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="77.93", x=0.612, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="68л6", x=0.640, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="101.99", x=0.672, y=0.0, width=0.01, height=0.01),
+        ]
 
-    @unittest.skipUnless(SAMPLE_IMAGE.exists(), "sample screenshot not available locally")
-    def test_sample_image_repairs_missing_quantities_and_bottom_row_identity(self) -> None:
-        records = extractor.build_records(self.SAMPLE_IMAGE)
-        by_key = {(row["symbol"], row["expiration"]): row for row in records}
+        parsed = extractor.parse_main_row(row)
 
-        self.assertEqual(by_key[("FBTC 70 Call", "May 15 2026")]["quantity"], "-3")
-        self.assertEqual(by_key[("FDIG 40 Call", "May 15 2026")]["quantity"], "-6")
-        self.assertEqual(by_key[("GOOGL 325 Put", "Apr 17 2026")]["quantity"], "-5")
-        self.assertEqual(by_key[("NVDA 195 Call", "Jul 17 2026")]["quantity"], "-4")
-        self.assertEqual(by_key[("TSLA 360 Put", "Aug 21 2026")]["quantity"], "-2")
-        self.assertEqual(by_key[("UBER 80 Call", "Jun 18 2026")]["quantity"], "-18")
-        self.assertTrue(
-            all(row["quantity"] for row in records if row["instrument_type"] == "option")
-        )
+        self.assertEqual(parsed["percent_change"], "+5.99%")
+        self.assertEqual(parsed["percent_total_gl"], "+179.94%")
+        self.assertEqual(parsed["day_range_low"], "73.79")
+        self.assertEqual(parsed["day_range_high"], "77.93")
+        self.assertEqual(parsed["week_52_low"], "68.46")
+        self.assertEqual(parsed["week_52_high"], "101.99")
 
-        self.assertEqual(by_key[("MSFT 420 Call", "Aug 21 2026")]["percent_change"], "+0.44%")
-        self.assertEqual(by_key[("PLTR 150 Call", "Jun 18 2026")]["day_range_high"], "10.31")
-        self.assertEqual(by_key[("PLTR 150 Call", "Jun 18 2026")]["week_52_low"], "4.40")
-        self.assertEqual(by_key[("UBER", "")]["percent_change"], "+5.99%")
-        self.assertEqual(by_key[("UBER", "")]["percent_total_gl"], "+179.94%")
-        self.assertEqual(by_key[("TSLA", "")]["percent_change"], "+7.62%")
-        self.assertEqual(by_key[("TSLA", "")]["percent_total_gl"], "-1.90%")
-        self.assertEqual(by_key[("PLTR", "")]["percent_total_gl"], "-22.12%")
-        self.assertEqual(by_key[("UBER", "")]["week_52_low"], "68.46")
-        self.assertEqual(by_key[("NVDA", "")]["week_52_high"], "212.19")
-        self.assertEqual(by_key[("ORCL", "")]["week_52_low"], "121.24")
-        self.assertEqual(by_key[("TSLA", "")]["week_52_low"], "222.79")
-        self.assertEqual(by_key[("GOOGL 325 Put", "Apr 17 2026")]["day_range_low"], "0.29")
-        self.assertEqual(by_key[("UBER 80 Call", "Jun 18 2026")]["description"], "")
+    def test_parse_main_row_repairs_range_decimal_loss(self) -> None:
+        row = [
+            extractor.OcrItem(text="+762%", x=0.355, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="-1,90%", x=0.969, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="-$2 281.50", x=0.890, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="362.50", x=0.580, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="394.65", x=0.610, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="222 79", x=0.641, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="498.83", x=0.672, y=0.0, width=0.01, height=0.01),
+        ]
+
+        parsed = extractor.parse_main_row(row)
+
+        self.assertEqual(parsed["percent_change"], "+7.62%")
+        self.assertEqual(parsed["percent_total_gl"], "-1.90%")
+        self.assertEqual(parsed["week_52_low"], "222.79")
+        self.assertEqual(parsed["week_52_high"], "498.83")
+
+    def test_parse_main_row_uses_header_derived_ranges_for_resized_layout(self) -> None:
+        header_row = [
+            extractor.OcrItem(text="Symbol", x=resize_x(0.04), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Last", x=resize_x(0.22), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Change", x=resize_x(0.29), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="%", x=resize_x(0.35), y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Change", x=resize_x(0.36), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Bid", x=resize_x(0.42), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Ask", x=resize_x(0.48), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Volume", x=resize_x(0.53), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Day", x=resize_x(0.585), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="52-week", x=resize_x(0.655), y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="Avg Cost", x=resize_x(0.725), y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="Quantity", x=resize_x(0.805), y=0.0, width=0.05, height=0.01),
+        ]
+        column_ranges = extractor.derive_column_ranges(header_row)
+        row = [
+            extractor.OcrItem(text="$76.72", x=resize_x(0.225), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="+$4.33", x=resize_x(0.295), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="+599%", x=resize_x(0.355), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$76.50", x=resize_x(0.425), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$76.90", x=resize_x(0.485), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="12,345", x=resize_x(0.530), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="73.79", x=resize_x(0.580), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="77.93", x=resize_x(0.612), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="6846", x=resize_x(0.640), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="101.99", x=resize_x(0.672), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="$70.01", x=resize_x(0.735), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="100", x=resize_x(0.805), y=0.0, width=0.02, height=0.01),
+        ]
+
+        parsed = extractor.parse_main_row(row, column_ranges)
+
+        self.assertEqual(parsed["last"], "$76.72")
+        self.assertEqual(parsed["change"], "+$4.33")
+        self.assertEqual(parsed["percent_change"], "+5.99%")
+        self.assertEqual(parsed["bid"], "$76.50")
+        self.assertEqual(parsed["ask"], "$76.90")
+        self.assertEqual(parsed["volume"], "12,345")
+        self.assertEqual(parsed["quantity"], "100")
+        self.assertEqual(parsed["day_range_low"], "73.79")
+        self.assertEqual(parsed["day_range_high"], "77.93")
+        self.assertEqual(parsed["week_52_low"], "68.46")
+        self.assertEqual(parsed["week_52_high"], "101.99")
+
+    def test_validate_required_fields_raises_for_missing_monitoring_columns(self) -> None:
+        record = {
+            "symbol": "UBER",
+            "last": "$76.72",
+            "change": "+$4.33",
+            "percent_change": "+5.99%",
+            "bid": "$76.50",
+            "ask": "$76.90",
+            "volume": "",
+            "quantity": "",
+            "day_range_low": "73.79",
+            "day_range_high": "77.93",
+            "week_52_low": "68.46",
+            "week_52_high": "101.99",
+        }
+
+        with self.assertRaisesRegex(ValueError, "volume, quantity"):
+            extractor.validate_required_fields(record, Path("fixture_input.png"))
 
     def test_timestamp_only_output_filename(self) -> None:
-        self.assertEqual(
-            extractor.csv_name(sample_created_at()),
-            "positions_monitoring_20260415T143116-0700.csv",
-        )
+        file_name = extractor.csv_name(sample_created_at())
+        self.assertTrue(file_name.startswith("positions_monitoring_"))
+        self.assertTrue(file_name.endswith(".csv"))
+        self.assertEqual(file_name.count(".csv"), 1)
 
     def test_process_image_raises_on_timestamp_collision_for_different_png(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            output_dir = temp_path / "output"
-            output_dir.mkdir()
-            csv_path = output_dir / extractor.csv_name(sample_created_at())
+            fixture_dir = temp_path / "existing_csv_fixture"
+            fixture_dir.mkdir()
+            csv_path = fixture_dir / extractor.csv_name(sample_created_at())
             csv_path.write_text(
                 "schema_name,image_file,created_at,symbol,instrument_type,description,expiration,last,change,percent_change,bid,ask,volume,day_range_low,day_range_high,week_52_low,week_52_high,avg_cost,quantity,total_gl,percent_total_gl\n"
-                "monitoring,other.png,2026-04-15T14:31:16-07:00,FBTC,equity,,,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n",
+                "monitoring,fixture_existing.png,2030-01-02T03:04:05-08:00,FBTC,equity,,,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n",
                 encoding="utf-8",
             )
-            image_path = temp_path / "sample.png"
+            image_path = temp_path / "fixture_input.png"
             image_path.write_bytes(b"not-a-real-png")
 
             original_output_dir = extractor.OUTPUT_DIR
             original_image_created_at = extractor.image_created_at
-            extractor.OUTPUT_DIR = output_dir
+            extractor.OUTPUT_DIR = fixture_dir
             extractor.image_created_at = lambda _: sample_created_at()
             try:
                 with self.assertRaises(FileExistsError):

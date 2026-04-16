@@ -7,20 +7,21 @@ import viewer
 
 
 def sample_created_at_iso() -> str:
-    return "2026-04-15T14:31:16-07:00"
+    return "2030-01-02T03:04:05-08:00"
 
 
 class ViewerHelperTests(unittest.TestCase):
     def test_format_timestamp_from_name_uses_timestamp_only_pattern(self) -> None:
         self.assertEqual(
-            viewer.format_timestamp_from_name("positions_monitoring_20260415T143116-0700.csv"),
+            viewer.format_timestamp_from_name("positions_monitoring_20300102T030405-0800.csv"),
             sample_created_at_iso(),
         )
 
     def test_build_data_payload_uses_created_at_field(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir)
-            csv_path = output_dir / "positions_monitoring_20260415T143116-0700.csv"
+            fixture_dir = Path(temp_dir) / "csv_fixture_store"
+            fixture_dir.mkdir()
+            csv_path = fixture_dir / "positions_monitoring_20300102T030405-0800.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(
                     handle,
@@ -52,7 +53,7 @@ class ViewerHelperTests(unittest.TestCase):
                 writer.writerow(
                     {
                         "schema_name": "monitoring",
-                        "image_file": "sample.png",
+                        "image_file": "fixture_input.png",
                         "created_at": sample_created_at_iso(),
                         "symbol": "FBTC",
                         "instrument_type": "equity",
@@ -76,7 +77,7 @@ class ViewerHelperTests(unittest.TestCase):
                 )
 
             original_output_dir = viewer.OUTPUT_DIR
-            viewer.OUTPUT_DIR = output_dir
+            viewer.OUTPUT_DIR = fixture_dir
             try:
                 payload = viewer.build_data_payload(csv_path.name)
             finally:
