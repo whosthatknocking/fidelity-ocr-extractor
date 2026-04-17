@@ -215,6 +215,8 @@ SYMBOL_STOPWORDS = {
     *(name.upper() for name in MONTH_NAMES),
     "CALL",
     "PUT",
+    "M",
+    "E",
     "INC",
     "CORP",
     "COM",
@@ -226,6 +228,10 @@ SYMBOL_STOPWORDS = {
     "AND",
     "THE",
 }
+OPTION_SYMBOL_RE = re.compile(r"\b([A-Z]{1,5})\s+(\d+(?:\.\d+)?)\s+(Call|Put)\b")
+EQUITY_SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")
+SIGNED_MONEY_FIELDS = {"change", "total_gl"}
+SIGNED_PERCENT_FIELDS = {"percent_change", "percent_total_gl"}
 
 EXACT_TEXT_FIXES = {
     "AU01026": "Aug 21 2026",
@@ -530,9 +536,9 @@ def clean_text(text: str) -> str:
         text.replace("S ", "$ ")
         .replace("+S", "+$")
         .replace("-S", "-$")
-        .replace("•", "")
-        .replace("Ф", "M")
-        .replace("@", "M")
+        .replace("•", " ")
+        .replace("Ф", " ")
+        .replace("@", " ")
         .replace("©", "")
         .replace("а", "4")
         .replace("á", "4")
@@ -549,6 +555,19 @@ def clean_text(text: str) -> str:
         text = text.replace(source, destination)
 
     return re.sub(r"\s+", " ", text).strip()
+
+
+def strip_icon_tokens(text: str) -> str:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return ""
+    tokens = cleaned.split()
+    filtered = [
+        token
+        for token in tokens
+        if token not in {"M", "E"} and token not in {"(M)", "(E)", "M)", "E)"}
+    ]
+    return " ".join(filtered)
 
 
 def normalize_header_label(text: str) -> str:
@@ -862,7 +881,7 @@ def is_range_row(row: list[OcrItem], column_ranges: dict[str, tuple[float, float
 
 
 def normalize_symbol_line(text: str) -> str:
-    text = clean_text(text)
+    text = strip_icon_tokens(text)
     text = re.sub(r"\s+[OeEG]$", "", text)
     text = re.sub(r"\s+(Call|Put)\s+[OeEG]$", r" \1", text)
     text = re.sub(r"\s*[\(\[\{]+$", "", text)
@@ -871,7 +890,7 @@ def normalize_symbol_line(text: str) -> str:
 
 
 def normalize_description(text: str) -> str:
-    return clean_text(text).replace("...", "").strip()
+    return strip_icon_tokens(text).replace("...", "").strip()
 
 
 def normalize_percent_text(text: str, *, paired_amount: str = "") -> str:
@@ -906,6 +925,8 @@ def normalize_percent_text(text: str, *, paired_amount: str = "") -> str:
 
     if not number_text:
         return ""
+    if not sign:
+        sign = "+"
     return f"{sign}{number_text}%"
 
 
@@ -951,6 +972,20 @@ def normalize_money_text(text: str) -> str:
     return f"{sign}{prefix}{cleaned}"
 
 
+def ensure_signed_money_text(text: str) -> str:
+    normalized = normalize_money_text(text)
+    if normalized and normalized[0] not in "+-":
+        return f"+{normalized}"
+    return normalized
+
+
+def ensure_signed_percent_text(text: str, *, paired_amount: str = "") -> str:
+    normalized = normalize_percent_text(text, paired_amount=paired_amount)
+    if normalized and normalized[0] not in "+-":
+        return f"+{normalized}"
+    return normalized
+
+
 def normalize_integer_text(text: str, *, signed: bool = False) -> str:
     cleaned = clean_text(text)
     if not cleaned:
@@ -969,6 +1004,10 @@ def normalize_integer_text(text: str, *, signed: bool = False) -> str:
 
 
 def normalize_field_value(field_name: str, text: str, *, paired_amount: str = "") -> str:
+    if field_name in SIGNED_MONEY_FIELDS:
+        return ensure_signed_money_text(text)
+    if field_name in SIGNED_PERCENT_FIELDS:
+        return ensure_signed_percent_text(text, paired_amount=paired_amount)
     if field_name in MONEY_FIELDS:
         return normalize_money_text(text)
     if field_name in PERCENT_FIELDS:
@@ -985,6 +1024,10 @@ def normalize_field_value(field_name: str, text: str, *, paired_amount: str = ""
 def is_valid_field_value(field_name: str, value: str) -> bool:
     if not value:
         return False
+    if field_name in SIGNED_MONEY_FIELDS:
+        return bool(re.fullmatch(r"[+-]\$\d+(?:\.\d{2})?", value))
+    if field_name in SIGNED_PERCENT_FIELDS:
+        return bool(re.fullmatch(r"[+-]\d+(?:\.\d{1,2})?%", value))
     if field_name in MONEY_FIELDS:
         return bool(re.fullmatch(r"[+-]?\$?\d+(?:\.\d{2})?", value))
     if field_name in PERCENT_FIELDS:
@@ -1335,12 +1378,12 @@ def looks_like_expiration(text: str) -> bool:
 
 def looks_like_option_symbol(text: str) -> bool:
     normalized = normalize_symbol_line(text)
-    return bool(re.fullmatch(r"[A-Z]{1,5}\s+\d+(?:\.\d+)?\s+(?:Call|Put)", normalized))
+    return bool(OPTION_SYMBOL_RE.fullmatch(normalized))
 
 
 def looks_like_equity_symbol(text: str) -> bool:
     normalized = normalize_symbol_line(text)
-    return bool(re.fullmatch(r"[A-Z]{1,5}", normalized))
+    return bool(EQUITY_SYMBOL_RE.fullmatch(normalized))
 
 
 def month_from_token(token: str) -> str:
@@ -1452,9 +1495,9 @@ def extract_option_symbol_from_lines(lines: list[str]) -> str:
     direct_candidates: list[str] = []
     for line in lines:
         normalized_line = normalize_symbol_line(line)
-        match = re.search(r"\b([A-Z]{1,5}\s+\d+(?:\.\d+)?\s+(?:Call|Put))\b", normalized_line)
+        match = OPTION_SYMBOL_RE.search(normalized_line)
         if match:
-            direct_candidates.append(match.group(1))
+            direct_candidates.append(match.group(0))
     if direct_candidates:
         chosen = normalize_symbol_line(direct_candidates[-1])
         if consensus_symbol:
@@ -1567,7 +1610,7 @@ def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
 
 
 def parse_symbol_block(lines: list[str]) -> tuple[str, str, str, str]:
-    cleaned = [clean_text(line) for line in lines if clean_text(line)]
+    cleaned = [normalize_symbol_line(line) for line in lines if normalize_symbol_line(line)]
     if not cleaned:
         return "", "unknown", "", ""
 
@@ -1581,28 +1624,12 @@ def parse_symbol_block(lines: list[str]) -> tuple[str, str, str, str]:
         return symbol_line, "option", "", expiration
 
     first = normalize_symbol_line(symbol_line or cleaned[0])
-    if len(cleaned) == 1 or (symbol_line and not remaining_lines):
-        source_line = next((line for line in cleaned if symbol_line and symbol_line in normalize_symbol_line(line)), cleaned[0])
-        stripped_source = normalize_symbol_line(source_line)
-        if symbol_line and symbol_line in stripped_source:
-            description = normalize_description(stripped_source.split(symbol_line, 1)[1])
-            if description:
-                return symbol_line, "equity", description, ""
-        tokens = first.split()
-        if len(tokens) >= 1 and re.fullmatch(r"[A-Z]{1,5}", tokens[0]):
-            description_tokens = tokens[1:]
-            if description_tokens and re.fullmatch(r"[A-Z]", description_tokens[0]):
-                description_tokens = description_tokens[1:]
-            return tokens[0], "equity", normalize_description(" ".join(description_tokens)), ""
-        if len(tokens) >= 2 and re.fullmatch(r"[A-Z]{1,5}", tokens[-1]):
-            return tokens[-1], "equity", normalize_description(" ".join(tokens[:-1])), ""
-
-    description = ""
-    for candidate in remaining_lines or cleaned[1:]:
-        if not looks_like_expiration(candidate):
-            description = normalize_description(candidate)
-            break
-    return first, "equity", description, ""
+    if EQUITY_SYMBOL_RE.fullmatch(first):
+        return first, "equity", "", ""
+    for token in re.findall(r"\b[A-Z]{1,5}\b", first):
+        if token not in SYMBOL_STOPWORDS and EQUITY_SYMBOL_RE.fullmatch(token):
+            return token, "equity", "", ""
+    return "", "unknown", "", ""
 
 
 def parse_main_row_raw(
@@ -2014,6 +2041,7 @@ def repair_volume_quantity_swap(record: dict[str, str]) -> dict[str, str]:
 
 def repair_position_pnl_fields(record: dict[str, str]) -> dict[str, str]:
     repaired = dict(record)
+    multiplier = 100.0 if repaired.get("instrument_type") == "option" else 1.0
     last = normalize_number(repaired.get("last"))
     avg_cost = normalize_number(repaired.get("avg_cost"))
     quantity = normalize_number(repaired.get("quantity"))
@@ -2022,12 +2050,16 @@ def repair_position_pnl_fields(record: dict[str, str]) -> dict[str, str]:
     if last is None or avg_cost is None or quantity is None or quantity == 0:
         return repaired
 
-    implied_total = (last - avg_cost) * quantity
-    if total_gl and not total_gl.startswith(("+", "-")) and abs(implied_total) > 0.01:
-        sign = "-" if implied_total < 0 else "+"
-        repaired["total_gl"] = f"{sign}{total_gl.lstrip('+-')}"
-        if percent_total_gl and not percent_total_gl.startswith(("+", "-")):
-            repaired["percent_total_gl"] = f"{sign}{percent_total_gl.lstrip('+-')}"
+    implied_total = (last - avg_cost) * quantity * multiplier
+    normalized_total_gl = normalize_number(total_gl)
+    expected_sign = "-" if implied_total < 0 else "+"
+    if (not total_gl or normalized_total_gl is None) and abs(implied_total) > 0.01:
+        repaired["total_gl"] = f"{implied_total:+.2f}"
+        repaired["total_gl"] = ensure_signed_money_text(repaired["total_gl"])
+    elif total_gl and abs(implied_total) > 0.01:
+        repaired["total_gl"] = f"{expected_sign}{total_gl.lstrip('+-')}"
+        if percent_total_gl:
+            repaired["percent_total_gl"] = f"{expected_sign}{percent_total_gl.lstrip('+-')}"
 
     normalized_percent_total = normalize_number(repaired.get("percent_total_gl"))
     compact_percent = re.sub(r"[^0-9]", "", repaired.get("percent_total_gl", ""))
@@ -2036,7 +2068,7 @@ def repair_position_pnl_fields(record: dict[str, str]) -> dict[str, str]:
         or abs(normalized_percent_total) < 0.1
         or ("." not in repaired.get("percent_total_gl", "") and len(compact_percent) <= 2)
     ):
-        basis = avg_cost * abs(quantity)
+        basis = avg_cost * abs(quantity) * multiplier
         if basis > 0:
             implied_percent = (implied_total / basis) * 100.0
             repaired["percent_total_gl"] = f"{implied_percent:+.2f}%"
@@ -2250,15 +2282,12 @@ def repair_record_from_crop_texts(
     retried_fields = set(repaired.get("_retried_fields", []))
     forced = force_fields or set()
 
-    symbol, instrument_type, description, expiration = parse_symbol_block(left_lines)
+    symbol, instrument_type, _description, expiration = parse_symbol_block(left_lines)
     if symbol:
         repaired["symbol"] = symbol
     if instrument_type:
         repaired["instrument_type"] = instrument_type
-    if repaired["instrument_type"] == "option":
-        repaired["description"] = ""
-    elif description or repaired["instrument_type"] == "equity":
-        repaired["description"] = description
+    repaired["description"] = ""
     if expiration or repaired["instrument_type"] == "option":
         repaired["expiration"] = expiration
 
@@ -2573,7 +2602,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                 if tesseract_primary:
                     targeted_left_lines = tesseract_left_lines(image, geometry, section_cache)
                     symbol_lines = targeted_left_lines + pending_symbol_lines
-                    symbol, instrument_type, description, expiration = parse_symbol_block(symbol_lines)
+                    symbol, instrument_type, _description, expiration = parse_symbol_block(symbol_lines)
                     parsed_fields = tesseract_row_stream_fields(image, geometry, active_column_ranges, section_cache)
                     current_record = {
                         "schema_name": SCHEMA_NAME,
@@ -2581,7 +2610,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                         "created_at": created_at,
                         "symbol": symbol,
                         "instrument_type": instrument_type,
-                        "description": description,
+                        "description": "",
                         "expiration": expiration,
                         **normalize_parsed_fields(parsed_fields),
                     }
@@ -2594,8 +2623,10 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                     current_record = repair_shifted_required_fields_from_raw(raw_fields, current_record)
                     current_record = repair_percent_change_from_price_fields(current_record)
                     current_record = repair_volume_quantity_swap(current_record)
+                    current_record = repair_quantity_sign_from_position(current_record)
                     current_record = repair_position_pnl_fields(current_record)
                     current_record = repair_quantity_from_position(current_record)
+                    current_record = repair_position_pnl_fields(current_record)
                     if current_record.get("instrument_type") == "option":
                         quantity_budget = OcrBudget(max_calls=3)
                         quantity_texts = collect_cell_texts(
@@ -2615,6 +2646,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                             current_record["quantity"] = quantity_candidate
                             current_record = adopt_raw_quantity_sign(current_record, raw_fields)
                             current_record = repair_quantity_sign_from_position(current_record)
+                            current_record = repair_position_pnl_fields(current_record)
                     if current_record.get("instrument_type") == "option" and last_equity_symbol:
                         underlying = current_record.get("symbol", "").split(" ", 1)[0]
                         if (
@@ -2628,14 +2660,14 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                                 1,
                             )
                 else:
-                    symbol, instrument_type, description, expiration = parse_symbol_block(candidate_lines)
+                    symbol, instrument_type, _description, expiration = parse_symbol_block(candidate_lines)
                     raw_record = RawRecord(
                         schema_name=SCHEMA_NAME,
                         image_file=image_path.name,
                         created_at=created_at,
                         symbol=symbol,
                         instrument_type=instrument_type,
-                        description=description,
+                        description="",
                         expiration=expiration,
                         raw_fields=raw_fields,
                         retried_fields=[],

@@ -31,6 +31,9 @@
 - Extraction must reject screenshots that fail basic image quality gates or do not expose all monitoring headers.
 - Header detection may normalize bounded OCR mistakes, but it must still map every header position to the fixed canonical monitoring label set.
 - Extraction must separate raw OCR collection from normalization and validation.
+- Symbol extraction must prefer strict monitoring shapes: `TICKER` for equities and `TICKER <strike> Call|Put` for options.
+- Option expirations must be emitted only for option rows, in `Mon DD YYYY` form. Equity rows must leave `expiration` blank.
+- Decorative badges such as the purple `M` and green `E` must be ignored during parsing.
 - Required monitoring fields are defined by `monitoring.required_fields` in `config.toml`; the current required set is `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, and `quantity`.
 - All monitoring header labels are required and are defined by `monitoring.required_header_keys` plus `monitoring.headers` in `config.toml`.
-- `day_range_low`, `day_range_high`, `week_52_low`, `week_52_high`, `avg_cost`, `total_gl`, and `percent_total_gl` remain part of the CSV schema but may be blank on individual rows even though their headers are always required.
+- `description`, `day_range_low`, `day_range_high`, `week_52_low`, `week_52_high`, `avg_cost`, `total_gl`, and `percent_total_gl` remain part of the CSV schema but may be blank on individual rows even though their headers are always required.

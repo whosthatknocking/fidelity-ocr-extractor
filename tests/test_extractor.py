@@ -104,6 +104,8 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(extractor.normalize_integer_text("3.191 887"), "3,191,887")
         self.assertEqual(extractor.repair_price_from_context("$70.40", "$170.60"), "$170.40")
         self.assertEqual(extractor.repair_price_from_context("$336.10", "$337.12"), "$336.10")
+        self.assertEqual(extractor.normalize_field_value("change", "$0.65"), "+$0.65")
+        self.assertEqual(extractor.normalize_field_value("percent_change", "1.00%"), "+1.00%")
         self.assertTrue(extractor.field_needs_retry("bid", "Act"))
         self.assertFalse(extractor.field_needs_retry("bid", "$64.83"))
 
@@ -257,12 +259,7 @@ class ExtractorHelperTests(unittest.TestCase):
         )
         self.assertEqual(symbol, "FDIG")
         self.assertEqual(instrument_type, "equity")
-        self.assertEqual(
-            description,
-            extractor.normalize_description(
-                "FIDELITY CRYPTO INDUSTRY AND DIGITAL PAYMENTS ETF"
-            ),
-        )
+        self.assertEqual(description, "")
         self.assertEqual(expiration, "")
 
     def test_parse_symbol_block_prefers_latest_option_candidate(self) -> None:
@@ -293,7 +290,7 @@ class ExtractorHelperTests(unittest.TestCase):
         )
         self.assertEqual(symbol, "FBTC")
         self.assertEqual(instrument_type, "equity")
-        self.assertEqual(description, "FIDELITY WISE ORIGIN BITCOIN FUND")
+        self.assertEqual(description, "")
         self.assertEqual(expiration, "")
 
     def test_parse_symbol_block_recovers_option_and_expiration_from_noisy_lines(self) -> None:
@@ -314,7 +311,14 @@ class ExtractorHelperTests(unittest.TestCase):
         )
         self.assertEqual(symbol, "UBER")
         self.assertEqual(instrument_type, "equity")
+        self.assertEqual(description, "")
         self.assertEqual(expiration, "")
+
+    def test_normalize_symbol_line_ignores_icon_tokens(self) -> None:
+        self.assertEqual(
+            extractor.normalize_symbol_line("M FBTC E FIDELITY WISE ORIGIN BITCOIN FUND"),
+            "FBTC FIDELITY WISE ORIGIN BITCOIN FUND",
+        )
 
     def test_select_symbol_lines_uses_current_row_equity_symbol(self) -> None:
         symbol, remaining = extractor.select_symbol_lines(
@@ -531,6 +535,20 @@ class ExtractorHelperTests(unittest.TestCase):
         )
         self.assertEqual(repaired["total_gl"], "-$3751.84")
         self.assertEqual(repaired["percent_total_gl"], "-15.01%")
+
+    def test_repair_position_pnl_fields_fills_missing_total_gl_from_position_math(self) -> None:
+        repaired = extractor.repair_position_pnl_fields(
+            {
+                "instrument_type": "option",
+                "last": "$3.00",
+                "avg_cost": "$1.92",
+                "quantity": "-52",
+                "total_gl": "",
+                "percent_total_gl": "",
+            }
+        )
+        self.assertEqual(repaired["total_gl"], "-$5616.00")
+        self.assertEqual(repaired["percent_total_gl"], "-56.25%")
 
     def test_adopt_raw_quantity_sign_prefers_plausible_equity_quantity(self) -> None:
         repaired = extractor.adopt_raw_quantity_sign(

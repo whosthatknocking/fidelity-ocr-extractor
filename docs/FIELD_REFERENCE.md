@@ -3,13 +3,13 @@
 - `schema_name`: fixed schema identifier. Current value is `monitoring`.
 - `image_file`: source PNG filename.
 - `created_at`: timestamp derived from the PNG creation time when available.
-- `symbol`: extracted symbol or option contract label from the monitoring table.
+- `symbol`: extracted ticker symbol in one of these forms: `TICKER` or `TICKER <strike> Call|Put`.
 - `instrument_type`: `equity` or `option`.
-- `description`: equity description when OCR captures it.
-- `expiration`: option expiration string when present in the screenshot.
-- `last`: last traded price.
-- `change`: absolute change value.
-- `percent_change`: percent move column.
+- `description`: optional free-text field. The extractor may leave it blank to avoid exporting noisy OCR.
+- `expiration`: option expiration string in `Mon DD YYYY` form for option rows only. Equity rows leave this blank.
+- `last`: last traded price as a dollar amount.
+- `change`: absolute change value as a signed dollar amount.
+- `percent_change`: percent move column as a signed percentage.
 - `bid`: bid price.
 - `ask`: ask price.
 - `volume`: volume column.
@@ -18,9 +18,9 @@
 - `week_52_low`: lower bound of 52-week range.
 - `week_52_high`: upper bound of 52-week range.
 - `avg_cost`: average cost basis column.
-- `quantity`: quantity column as captured from OCR.
-- `total_gl`: total gain/loss column.
-- `percent_total_gl`: total gain/loss percent column.
+- `quantity`: quantity column as an integer and it may be negative.
+- `total_gl`: total gain/loss column as a signed dollar amount.
+- `percent_total_gl`: total gain/loss percent column as a signed percentage.
 
 Required for every extracted monitoring row:
 
