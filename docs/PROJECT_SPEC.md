@@ -27,7 +27,8 @@
 - `created_at` must come from the PNG creation time when available.
 - Re-running the extractor must check every file in `input/` and skip only when the deterministic output file already exists.
 - Extraction must adapt to browser-size and screenshot-resolution changes by calibrating column positions from the detected monitoring header row.
-- Extraction must reject screenshots that fail basic image quality gates or do not expose all monitoring headers exactly.
+- Extraction must reject screenshots that fail basic image quality gates or do not expose all monitoring headers.
+- Header detection may normalize bounded OCR mistakes, but it must still map every header position to the fixed canonical monitoring label set.
 - Extraction must separate raw OCR collection from normalization and validation.
 - Required monitoring fields are defined by `monitoring.required_fields` in `fidelity_extractor.toml`; the current required set is `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, and `quantity`.
 - All monitoring header labels are required and are defined by `monitoring.required_header_keys` plus `monitoring.headers` in `fidelity_extractor.toml`.

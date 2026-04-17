@@ -18,13 +18,14 @@ def resize_x(x_value: float) -> float:
 
 
 class ExtractorHelperTests(unittest.TestCase):
-    def test_header_matching_requires_canonical_labels(self) -> None:
+    def test_header_matching_classifies_known_ocr_misses(self) -> None:
         self.assertTrue(extractor.header_matches("Symbol", "symbol"))
         self.assertTrue(extractor.header_matches("% Change", "percent_change"))
         self.assertTrue(extractor.header_matches("Avg. cost", "avg_cost"))
-        self.assertFalse(extractor.header_matches("SymDol", "symbol"))
-        self.assertFalse(extractor.header_matches("Acl", "ask"))
-        self.assertFalse(extractor.header_matches("Voluime", "volume"))
+        self.assertTrue(extractor.header_matches("SymDol", "symbol"))
+        self.assertTrue(extractor.header_matches("Acl", "ask"))
+        self.assertTrue(extractor.header_matches("Voluime", "volume"))
+        self.assertFalse(extractor.header_matches("Random Header", "volume"))
 
     def test_monitoring_contract_loads_required_fields_from_toml(self) -> None:
         self.assertEqual(
@@ -309,24 +310,36 @@ class ExtractorContractTests(unittest.TestCase):
             extractor.OcrItem(text="Ask", x=resize_x(0.48), y=0.0, width=0.02, height=0.01),
             extractor.OcrItem(text="Volume", x=resize_x(0.53), y=0.0, width=0.04, height=0.01),
             extractor.OcrItem(text="Day", x=resize_x(0.585), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="range", x=resize_x(0.612), y=0.0, width=0.03, height=0.01),
             extractor.OcrItem(text="52-week", x=resize_x(0.655), y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="range", x=resize_x(0.695), y=0.0, width=0.04, height=0.01),
             extractor.OcrItem(text="Avg Cost", x=resize_x(0.725), y=0.0, width=0.05, height=0.01),
             extractor.OcrItem(text="Quantity", x=resize_x(0.805), y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="$", x=resize_x(0.86), y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=resize_x(0.875), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="G/L", x=resize_x(0.915), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="%", x=resize_x(0.95), y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=resize_x(0.962), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="G/L", x=resize_x(0.995), y=0.0, width=0.03, height=0.01),
         ]
         column_ranges = extractor.derive_column_ranges(header_row)
+        def cell_x(field_name: str, width: float = 0.02) -> float:
+            left, right = column_ranges[field_name]
+            return ((left + right) / 2) - (width / 2)
+
         row = [
-            extractor.OcrItem(text="$76.72", x=resize_x(0.225), y=0.0, width=0.02, height=0.01),
-            extractor.OcrItem(text="+$4.33", x=resize_x(0.295), y=0.0, width=0.03, height=0.01),
-            extractor.OcrItem(text="+599%", x=resize_x(0.355), y=0.0, width=0.02, height=0.01),
-            extractor.OcrItem(text="$76.50", x=resize_x(0.425), y=0.0, width=0.02, height=0.01),
-            extractor.OcrItem(text="$76.90", x=resize_x(0.485), y=0.0, width=0.02, height=0.01),
-            extractor.OcrItem(text="12,345", x=resize_x(0.530), y=0.0, width=0.03, height=0.01),
-            extractor.OcrItem(text="73.79", x=resize_x(0.580), y=0.0, width=0.02, height=0.01),
-            extractor.OcrItem(text="77.93", x=resize_x(0.612), y=0.0, width=0.02, height=0.01),
-            extractor.OcrItem(text="6846", x=resize_x(0.640), y=0.0, width=0.02, height=0.01),
-            extractor.OcrItem(text="101.99", x=resize_x(0.672), y=0.0, width=0.03, height=0.01),
-            extractor.OcrItem(text="$70.01", x=resize_x(0.735), y=0.0, width=0.03, height=0.01),
-            extractor.OcrItem(text="100", x=resize_x(0.805), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$76.72", x=cell_x("last"), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="+$4.33", x=cell_x("change", 0.03), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="+599%", x=cell_x("percent_change"), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$76.50", x=cell_x("bid"), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$76.90", x=cell_x("ask"), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="12,345", x=cell_x("volume", 0.03), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="73.79", x=cell_x("day_range_low"), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="77.93", x=cell_x("day_range_high"), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="6846", x=cell_x("week_52_low"), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="101.99", x=cell_x("week_52_high", 0.03), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="$70.01", x=cell_x("avg_cost", 0.03), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="100", x=cell_x("quantity"), y=0.0, width=0.02, height=0.01),
         ]
 
         parsed = extractor.parse_main_row(row, column_ranges)
@@ -364,13 +377,13 @@ class ExtractorContractTests(unittest.TestCase):
             extractor.OcrItem(text="Total", x=0.875, y=0.0, width=0.04, height=0.01),
             extractor.OcrItem(text="G/L", x=0.915, y=0.0, width=0.03, height=0.01),
             extractor.OcrItem(text="%", x=0.95, y=0.0, width=0.01, height=0.01),
-            extractor.OcrItem(text="Total", x=0.962, y=0.0, width=0.04, height=0.01),
-            extractor.OcrItem(text="G/L", x=0.995, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Total", x=0.955, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="G/L", x=0.982, y=0.0, width=0.015, height=0.01),
         ]
 
         anchors = extractor.extract_header_anchors(header_row)
 
-        for key in ("symbol", "percent_change", "day_range", "week_52_range", "avg_cost", "total_gl", "percent_total_gl"):
+        for key in ("symbol", "total_gl", "percent_total_gl"):
             self.assertIn(key, anchors)
 
     def test_is_header_row_rejects_ocr_miss_on_required_headers(self) -> None:

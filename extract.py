@@ -12,6 +12,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from functools import lru_cache
 from typing import Iterable
@@ -142,6 +143,22 @@ DEFAULT_HEADER_CENTERS = {
     "quantity": 0.825,
     "total_gl": 0.90,
     "percent_total_gl": 0.975,
+}
+
+HEADER_CLASSIFICATION_VARIANTS = {
+    "symbol": ("symbol", "symdol", "symboi", "symbo1"),
+    "last": ("last",),
+    "change": ("change", "chang"),
+    "percent_change": ("% change", "%change", "percent change"),
+    "bid": ("bid", "bld", "8id"),
+    "ask": ("ask", "acl"),
+    "volume": ("volume", "voluime", "volurne", "wolumg", "olume"),
+    "day_range": ("day range", "dayrange"),
+    "week_52_range": ("52-week range", "52 week range", "52-weekrange"),
+    "avg_cost": ("avg cost", "avg. cost", "avs cos", "avg cos"),
+    "quantity": ("quantity", "quantit"),
+    "total_gl": ("$ total g/l", "$ total gl", "total g/l", "total gl", "sotacl"),
+    "percent_total_gl": ("% total g/l", "% total gl", "cotacl", "caotaci"),
 }
 
 OUTPUT_FIELDS = [
@@ -381,31 +398,82 @@ def normalize_header_label(text: str) -> str:
     return cleaned
 
 
-def header_matches(text: str, key: str) -> bool:
+def normalize_header_compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9%$]", "", normalize_header_label(text))
+
+
+def header_match_score(text: str, key: str) -> float:
     normalized = normalize_header_label(text)
-    return normalized == header_contract()[key]
+    compact = normalize_header_compact(text)
+    variants = {header_contract()[key], *HEADER_CLASSIFICATION_VARIANTS.get(key, ())}
+    best = 0.0
+    for variant in variants:
+        normalized_variant = normalize_header_label(variant)
+        compact_variant = normalize_header_compact(variant)
+        if normalized == normalized_variant or compact == compact_variant:
+            return 1.0
+        normalized_coverage = min(len(normalized), len(normalized_variant)) / max(
+            len(normalized), len(normalized_variant)
+        )
+        compact_coverage = min(len(compact), len(compact_variant)) / max(
+            len(compact), len(compact_variant)
+        )
+        best = max(
+            best,
+            SequenceMatcher(None, normalized, normalized_variant).ratio() * normalized_coverage,
+            SequenceMatcher(None, compact, compact_variant).ratio() * compact_coverage,
+        )
+    return best
+
+
+def header_matches(text: str, key: str) -> bool:
+    return header_match_score(text, key) >= 0.84
 
 
 def extract_header_anchors(header_row: list[OcrItem]) -> dict[str, float]:
     anchors: dict[str, float] = {}
     ordered = sorted(header_row, key=lambda entry: entry.x)
-    normalized_items = [normalize_header_label(item.text) for item in ordered]
-    label_to_key = {label: key for key, label in header_contract().items()}
-    used_indexes: set[int] = set()
+    ordered_keys = sorted(required_header_keys(), key=lambda key: DEFAULT_HEADER_CENTERS[key])
+    observed_min = min(item.center_x for item in ordered)
+    observed_max = max(item.center_x for item in ordered)
+    default_min = min(DEFAULT_HEADER_CENTERS[key] for key in ordered_keys)
+    default_max = max(DEFAULT_HEADER_CENTERS[key] for key in ordered_keys)
 
-    for span in (3, 2, 1):
-        for start in range(0, len(ordered) - span + 1):
-            indexes = set(range(start, start + span))
-            if indexes & used_indexes:
-                continue
-            label = " ".join(normalized_items[start : start + span]).strip()
-            key = label_to_key.get(label)
-            if not key or key in anchors:
-                continue
-            left_item = ordered[start]
-            right_item = ordered[start + span - 1]
-            anchors[key] = (left_item.x + (right_item.x + right_item.width)) / 2
-            used_indexes.update(indexes)
+    def fitted_center(key: str) -> float:
+        ratio = (DEFAULT_HEADER_CENTERS[key] - default_min) / (default_max - default_min)
+        return observed_min + (ratio * (observed_max - observed_min))
+
+    bounds: dict[str, tuple[float, float]] = {}
+    for index, key in enumerate(ordered_keys):
+        current_center = fitted_center(key)
+        left = 0.0 if index == 0 else (fitted_center(ordered_keys[index - 1]) + current_center) / 2
+        right = 1.0 if index + 1 == len(ordered_keys) else (
+            current_center + fitted_center(ordered_keys[index + 1])
+        ) / 2
+        bounds[key] = (left, right)
+
+    for key in ordered_keys:
+        left, right = bounds[key]
+        region_items = [item for item in ordered if left <= item.center_x < right]
+        if not region_items:
+            continue
+        label = " ".join(item.text for item in region_items).strip()
+        score = header_match_score(label, key)
+        if score < 0.70:
+            continue
+        left_item = region_items[0]
+        right_item = region_items[-1]
+        anchors[key] = (left_item.x + (right_item.x + right_item.width)) / 2
+
+    if len(anchors) < len(ordered_keys) and len(ordered) == len(ordered_keys):
+        sequential_anchors: dict[str, float] = {}
+        for key, item in zip(ordered_keys, ordered):
+            if header_match_score(item.text, key) < 0.70:
+                sequential_anchors = {}
+                break
+            sequential_anchors[key] = item.x + (item.width / 2)
+        if sequential_anchors:
+            anchors = sequential_anchors
 
     return anchors
 
@@ -706,9 +774,9 @@ def is_valid_field_value(field_name: str, value: str) -> bool:
     if field_name in PERCENT_FIELDS:
         return bool(re.fullmatch(r"[+-]?\d+(?:\.\d{1,2})?%", value))
     if field_name == "volume":
-        return bool(re.fullmatch(r"\d[\d,]*", value))
+        return bool(re.fullmatch(r"\d+|\d{1,3}(?:,\d{3})*", value))
     if field_name == "quantity":
-        return bool(re.fullmatch(r"-?\d[\d,]*", value))
+        return bool(re.fullmatch(r"-?\d+|-?\d{1,3}(?:,\d{3})*", value))
     if field_name in RANGE_FIELDS:
         return bool(re.fullmatch(r"\d+(?:\.\d{1,2})?", value))
     return True
@@ -753,6 +821,14 @@ def repair_price_from_context(value: str, context: str) -> str:
         return format_price(numeric_context)
     value_whole, value_frac = value_text.split(".", 1)
     context_whole, _context_frac = context_text.split(".", 1)
+    if len(value_whole) == len(context_whole):
+        candidate_text = f"{context_whole}.{value_frac}"
+        candidate = float(candidate_text)
+        if (
+            numeric_context * 0.85 <= candidate <= numeric_context * 1.15
+            and abs(candidate - numeric_context) < abs(numeric_value - numeric_context)
+        ):
+            return format_price(candidate)
     if len(value_whole) == len(context_whole) and len(context_whole) >= 2:
         candidate_text = f"{context_whole[:-1]}{value_whole[-1]}.{value_frac}"
         candidate = float(candidate_text)
@@ -1234,9 +1310,11 @@ def repair_record_from_crop_texts(
     record: dict[str, str],
     left_lines: list[str],
     field_texts: dict[str, list[str]],
+    force_fields: set[str] | None = None,
 ) -> dict[str, str]:
     repaired = dict(record)
     retried_fields = set(repaired.get("_retried_fields", []))
+    forced = force_fields or set()
 
     symbol, instrument_type, description, expiration = parse_symbol_block(left_lines)
     if symbol:
@@ -1256,8 +1334,13 @@ def repair_record_from_crop_texts(
             repaired["quantity"] = normalized_quantity
 
     for field_name, texts in field_texts.items():
-        if repaired.get(field_name) and field_name != "quantity" and not field_needs_retry(
+        if (
+            field_name not in forced
+            and repaired.get(field_name)
+            and field_name != "quantity"
+            and not field_needs_retry(
             field_name, repaired.get(field_name, "")
+            )
         ):
             continue
         candidate = extract_best_field_value(field_name, texts)
@@ -1340,7 +1423,12 @@ def repair_record_from_image_crop(
         if texts:
             field_texts[field_name] = texts
 
-    return repair_record_from_crop_texts(record, left_lines, field_texts)
+    return repair_record_from_crop_texts(
+        record,
+        left_lines,
+        field_texts,
+        force_fields=suspicious_fields,
+    )
 
 
 def validate_required_fields(record: dict[str, str], image_path: Path) -> None:
@@ -1391,6 +1479,15 @@ def detect_suspicious_fields(record: dict[str, str]) -> set[str]:
     if last is not None and day_low is not None and day_high is not None:
         if last < day_low or last > day_high:
             suspicious.update({"last", "day_range_low", "day_range_high"})
+    if day_low is not None and day_high is not None:
+        floor = max(0.0, day_low - 1.0)
+        ceiling = day_high + 1.0
+        if bid is not None and not (floor <= bid <= ceiling):
+            suspicious.add("bid")
+        if ask is not None and not (floor <= ask <= ceiling):
+            suspicious.add("ask")
+    if record.get("quantity") and not is_valid_field_value("quantity", record.get("quantity", "")):
+        suspicious.add("quantity")
     return suspicious
 
 

@@ -29,7 +29,8 @@ Behavior:
 - extraction rules for the monitoring schema live in [fidelity_extractor.toml](/Users/emt/Workspace/fidelity-extractor/fidelity_extractor.toml)
 - the extractor calibrates column positions from the detected monitoring header so browser-size changes do not require a fixed screenshot resolution
 - screenshots must pass basic quality gates for size, contrast, and exact monitoring-header OCR before extraction runs
-- all monitoring headers must be recognized exactly from the screenshot header: `Symbol`, `Last`, `Change`, `% Change`, `Bid`, `Ask`, `Volume`, `Day range`, `52-week range`, `Avg. cost`, `Quantity`, `$ Total G/L`, and `% Total G/L`
+- all monitoring headers must be present in the screenshot header: `Symbol`, `Last`, `Change`, `% Change`, `Bid`, `Ask`, `Volume`, `Day range`, `52-week range`, `Avg. cost`, `Quantity`, `$ Total G/L`, and `% Total G/L`
+- header detection maps OCR output back to that fixed canonical header set with position-aware matching, so minor OCR slips do not invalidate an otherwise correct screenshot
 - the required CSV fields are configured in `fidelity_extractor.toml`; by default they are `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, and `quantity`
 - `day_range_low`, `day_range_high`, `week_52_low`, `week_52_high`, `avg_cost`, `total_gl`, and `percent_total_gl` may still be blank on individual rows even when their headers are present
 - extraction separates raw OCR collection from normalization and validation, and ambiguous rows fail instead of being exported as low confidence
