@@ -80,6 +80,7 @@ body.is-resizing {
   flex-direction: column;
   height: calc(100vh - 20px);
   min-height: 0;
+  min-width: 0;
   background: transparent;
 }
 
@@ -225,6 +226,7 @@ input,
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -232,6 +234,7 @@ input,
   display: none;
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
 }
 
 .tab-panel.active {
@@ -288,6 +291,7 @@ input,
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
 }
 
 .table-status,
@@ -304,10 +308,14 @@ input,
 }
 
 .table-scroll {
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
   padding: 0 14px 14px;
+  scrollbar-gutter: stable both-edges;
+  -webkit-overflow-scrolling: touch;
 }
 
 table {
@@ -464,6 +472,7 @@ body.is-resizing .column-resizer::after {
   gap: 8px;
   padding: 10px 14px 14px;
   border-top: 1px solid var(--line);
+  overflow-x: auto;
 }
 
 .summary-shell {
@@ -745,6 +754,7 @@ body.is-resizing .column-resizer::after {
 
   .workspace-main {
     overflow: visible;
+    min-width: 0;
   }
 
   .summary-ticker-grid {
