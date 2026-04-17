@@ -103,6 +103,7 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(extractor.normalize_money_text("-$2 281.50"), "-$2281.50")
         self.assertEqual(extractor.normalize_integer_text("3.191 887"), "3,191,887")
         self.assertEqual(extractor.repair_price_from_context("$70.40", "$170.60"), "$170.40")
+        self.assertEqual(extractor.repair_price_from_context("$336.10", "$337.12"), "$336.10")
         self.assertTrue(extractor.field_needs_retry("bid", "Act"))
         self.assertFalse(extractor.field_needs_retry("bid", "$64.83"))
 
@@ -286,6 +287,35 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(symbol, "FBTC 70 Call")
         self.assertEqual(remaining, ["May 15 2026"])
 
+    def test_parse_symbol_block_recovers_equity_symbol_from_noisy_description_line(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["wy rae FBTC FIDELITY WISE ORIGIN BITCOIN FUND"]
+        )
+        self.assertEqual(symbol, "FBTC")
+        self.assertEqual(instrument_type, "equity")
+        self.assertEqual(description, "FIDELITY WISE ORIGIN BITCOIN FUND")
+        self.assertEqual(expiration, "")
+
+    def test_parse_symbol_block_recovers_option_and_expiration_from_noisy_lines(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            [
+                "FBTC TIVECLIIT May 15 70 2026 V¥IOE Call VNIOIN DIILVUIN FUINY",
+                "G) = FETC 70 Call",
+            ]
+        )
+        self.assertEqual(symbol, "FBTC 70 Call")
+        self.assertEqual(instrument_type, "option")
+        self.assertEqual(description, "")
+        self.assertEqual(expiration, "May 15 2026")
+
+    def test_parse_symbol_block_prefers_multi_letter_symbol_over_leading_noise(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["M om UBER UBER TECHNOLOGIES INC COM", "6 UIBER"]
+        )
+        self.assertEqual(symbol, "UBER")
+        self.assertEqual(instrument_type, "equity")
+        self.assertEqual(expiration, "")
+
     def test_select_symbol_lines_uses_current_row_equity_symbol(self) -> None:
         symbol, remaining = extractor.select_symbol_lines(
             ["GOOGL", "ALPHABET INC CAP STK CL A"]
@@ -427,6 +457,136 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(repaired["change"], "+$0.65")
         self.assertEqual(repaired["percent_change"], "+1.00%")
         self.assertEqual(repaired["bid"], "$65.01")
+
+    def test_tesseract_row_stream_fields_maps_monitoring_columns_in_order(self) -> None:
+        items = [
+            extractor.OcrItem(text="$337.12", x=0.20, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+$4.21", x=0.27, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+1.26%", x=0.34, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$336.10", x=0.42, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$336.40", x=0.48, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="24,864,034", x=0.55, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="330.90", x=0.60, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="337.48", x=0.63, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="146.10", x=0.67, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="349.00", x=0.70, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$312.53", x=0.76, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="100", x=0.83, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+$2,459.00", x=0.90, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+7.87%", x=0.97, y=0.0, width=0.01, height=0.01),
+        ]
+
+        with mock.patch("extract.row_section_ocr_items", return_value=items):
+            parsed = extractor.tesseract_row_stream_fields(
+                image=mock.Mock(),
+                geometry=extractor.RowGeometry(0, 10, 0.2, []),
+                column_ranges=extractor.DEFAULT_COLUMN_RANGES,
+                section_cache={},
+            )
+
+        self.assertEqual(parsed["last"], "$337.12")
+        self.assertEqual(parsed["change"], "+$4.21")
+        self.assertEqual(parsed["percent_change"], "+1.26%")
+        self.assertEqual(parsed["bid"], "$336.10")
+        self.assertEqual(parsed["ask"], "$336.40")
+        self.assertEqual(parsed["volume"], "24,864,034")
+        self.assertEqual(parsed["day_range_low"], "330.90")
+        self.assertEqual(parsed["day_range_high"], "337.48")
+        self.assertEqual(parsed["week_52_low"], "146.10")
+        self.assertEqual(parsed["week_52_high"], "349.00")
+        self.assertEqual(parsed["avg_cost"], "$312.53")
+        self.assertEqual(parsed["quantity"], "100")
+        self.assertEqual(parsed["total_gl"], "+$2459.00")
+        self.assertEqual(parsed["percent_total_gl"], "+7.87%")
+
+    def test_repair_percent_change_from_price_fields_reduces_shifted_percent(self) -> None:
+        repaired = extractor.repair_percent_change_from_price_fields(
+            {
+                "last": "$411.22",
+                "change": "+$18.11",
+                "percent_change": "44.61%",
+            }
+        )
+        self.assertEqual(repaired["percent_change"], "+4.61%")
+
+    def test_repair_volume_quantity_swap_moves_large_integer_to_volume(self) -> None:
+        repaired = extractor.repair_volume_quantity_swap(
+            {
+                "volume": "2",
+                "quantity": "3,188,082",
+            }
+        )
+        self.assertEqual(repaired["volume"], "3,188,082")
+        self.assertEqual(repaired["quantity"], "2")
+
+    def test_repair_position_pnl_fields_adds_sign_and_percent(self) -> None:
+        repaired = extractor.repair_position_pnl_fields(
+            {
+                "last": "$65.36",
+                "avg_cost": "$76.90",
+                "quantity": "325",
+                "total_gl": "$3751.84",
+                "percent_total_gl": "01%",
+            }
+        )
+        self.assertEqual(repaired["total_gl"], "-$3751.84")
+        self.assertEqual(repaired["percent_total_gl"], "-15.01%")
+
+    def test_adopt_raw_quantity_sign_prefers_plausible_equity_quantity(self) -> None:
+        repaired = extractor.adopt_raw_quantity_sign(
+            {
+                "instrument_type": "equity",
+                "quantity": "2",
+            },
+            {"quantity": "325"},
+        )
+        self.assertEqual(repaired["quantity"], "325")
+
+    def test_adopt_raw_quantity_sign_prefers_nearby_negative_option_quantity(self) -> None:
+        repaired = extractor.adopt_raw_quantity_sign(
+            {
+                "instrument_type": "option",
+                "quantity": "-20",
+            },
+            {"quantity": "-18"},
+        )
+        self.assertEqual(repaired["quantity"], "-18")
+
+    def test_repair_quantity_from_position_uses_total_gl_math(self) -> None:
+        repaired = extractor.repair_quantity_from_position(
+            {
+                "instrument_type": "equity",
+                "last": "$65.36",
+                "avg_cost": "$76.90",
+                "total_gl": "-$3751.84",
+                "quantity": "2",
+            }
+        )
+        self.assertEqual(repaired["quantity"], "325")
+
+    def test_repair_option_quantity_from_position_uses_contract_multiplier(self) -> None:
+        repaired = extractor.repair_quantity_from_position(
+            {
+                "instrument_type": "option",
+                "last": "$3.00",
+                "avg_cost": "$1.92",
+                "total_gl": "-$5630.99",
+                "quantity": "52",
+            }
+        )
+        self.assertEqual(repaired["quantity"], "-52")
+
+    def test_repair_quantity_sign_from_position_sets_negative_option_sign(self) -> None:
+        repaired = extractor.repair_quantity_sign_from_position(
+            {
+                "instrument_type": "option",
+                "last": "$4.30",
+                "avg_cost": "$4.35",
+                "total_gl": "+$98.89",
+                "quantity": "18",
+            }
+        )
+        self.assertEqual(repaired["quantity"], "-18")
 
 
 class ExtractorContractTests(unittest.TestCase):

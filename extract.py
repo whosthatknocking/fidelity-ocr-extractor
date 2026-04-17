@@ -209,6 +209,24 @@ DESCRIPTION_FIXES = {
     "TECHNOLOGIE$": "TECHNOLOGIES",
 }
 
+MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+MONTH_PREFIX_MAP = {name.lower(): name for name in MONTH_NAMES}
+SYMBOL_STOPWORDS = {
+    *(name.upper() for name in MONTH_NAMES),
+    "CALL",
+    "PUT",
+    "INC",
+    "CORP",
+    "COM",
+    "CAP",
+    "STK",
+    "CL",
+    "ETF",
+    "FUND",
+    "AND",
+    "THE",
+}
+
 EXACT_TEXT_FIXES = {
     "AU01026": "Aug 21 2026",
     "AU0206": "Aug 21 2026",
@@ -1040,7 +1058,8 @@ def repair_price_from_context(value: str, context: str) -> str:
             and abs(candidate - numeric_context) < abs(numeric_value - numeric_context)
         ):
             return format_price(candidate)
-    if len(value_whole) == len(context_whole):
+    large_gap = abs(numeric_value - numeric_context) > max(5.0, numeric_context * 0.15)
+    if len(value_whole) == len(context_whole) and large_gap:
         candidate_text = f"{context_whole}.{value_frac}"
         candidate = float(candidate_text)
         if (
@@ -1048,7 +1067,7 @@ def repair_price_from_context(value: str, context: str) -> str:
             and abs(candidate - numeric_context) < abs(numeric_value - numeric_context)
         ):
             return format_price(candidate)
-    if len(value_whole) == len(context_whole) and len(context_whole) >= 2:
+    if len(value_whole) == len(context_whole) and len(context_whole) >= 2 and large_gap:
         candidate_text = f"{context_whole[:-1]}{value_whole[-1]}.{value_frac}"
         candidate = float(candidate_text)
         if (
@@ -1324,8 +1343,176 @@ def looks_like_equity_symbol(text: str) -> bool:
     return bool(re.fullmatch(r"[A-Z]{1,5}", normalized))
 
 
+def month_from_token(token: str) -> str:
+    letters = re.sub(r"[^A-Za-z]", "", clean_text(token)).lower()
+    if not letters:
+        return ""
+    if letters in MONTH_PREFIX_MAP:
+        return MONTH_PREFIX_MAP[letters]
+    if len(letters) >= 3:
+        prefix = letters[:3]
+        if prefix in MONTH_PREFIX_MAP:
+            return MONTH_PREFIX_MAP[prefix]
+        if not re.search(r"[aeiouy]", letters):
+            return ""
+        best_name = max(MONTH_NAMES, key=lambda name: SequenceMatcher(None, prefix, name.lower()[:3]).ratio())
+        if len(letters) <= 4 and SequenceMatcher(None, prefix, best_name.lower()[:3]).ratio() >= 0.7:
+            return best_name
+    return ""
+
+
+def normalized_digit_token(token: str) -> str:
+    cleaned = clean_text(token)
+    cleaned = (
+        cleaned.replace("O", "0")
+        .replace("o", "0")
+        .replace("I", "1")
+        .replace("l", "1")
+        .replace("Z", "2")
+        .replace("z", "2")
+        .replace("S", "5")
+        .replace("s", "5")
+    )
+    return re.sub(r"[^0-9]", "", cleaned)
+
+
+def extract_expiration_from_lines(lines: list[str]) -> str:
+    for line in lines:
+        tokens = re.findall(r"[A-Za-z]+|\d+", clean_text(line))
+        for index, token in enumerate(tokens):
+            month = month_from_token(token)
+            if not month:
+                continue
+            trailing_digits = [normalized_digit_token(candidate) for candidate in tokens[index + 1 : index + 8]]
+            pre_year_digits: list[str] = []
+            for digits in trailing_digits:
+                if digits.startswith("20") and len(digits) == 4:
+                    break
+                pre_year_digits.append(digits)
+            valid_days = [int(digits) for digits in pre_year_digits if digits and 1 <= int(digits) <= 31]
+            day = ""
+            for candidate in valid_days:
+                if candidate >= 10:
+                    day = str(candidate)
+                    break
+            if not day and valid_days:
+                day = str(valid_days[-1])
+            year_candidates = [digits for digits in trailing_digits if digits.startswith("20") and len(digits) == 4]
+            year = year_candidates[-1] if year_candidates else ""
+            if month and day and year:
+                return f"{month} {day} {year}"
+    return ""
+
+
+def score_symbol_candidate(tokens: list[str], index: int) -> int:
+    token = tokens[index]
+    if not re.fullmatch(r"[A-Z]{1,5}", token):
+        return -100
+    if token in SYMBOL_STOPWORDS:
+        return -100
+    score = 6 if len(token) >= 2 else 1
+    if index <= 4:
+        score += 2
+    trailing_words = 0
+    for candidate in tokens[index + 1 : index + 6]:
+        if candidate.isdigit():
+            score += 4
+            continue
+        if candidate in SYMBOL_STOPWORDS:
+            continue
+        if len(candidate) >= 3:
+            trailing_words += 1
+    score += trailing_words * 3
+    if any(candidate in {"CALL", "PUT"} for candidate in tokens[index + 1 : index + 8]):
+        score += 5
+    return score
+
+
+def extract_symbol_candidate_from_lines(lines: list[str]) -> str:
+    best_symbol = ""
+    best_score = -100
+    fallback_symbol = ""
+    fallback_score = -100
+    for line in lines:
+        tokens = re.findall(r"\b[A-Z]{1,5}\b|\d+(?:\.\d+)?|Call|Put", normalize_symbol_line(line).replace(".", " "))
+        normalized_tokens = [token.upper() if token not in {"Call", "Put"} else token.upper() for token in tokens]
+        for index, token in enumerate(normalized_tokens):
+            score = score_symbol_candidate(normalized_tokens, index)
+            if len(token) > 1 and score > best_score:
+                best_symbol = token
+                best_score = score
+            if score > fallback_score:
+                fallback_symbol = token
+                fallback_score = score
+    return best_symbol or fallback_symbol
+
+
+def extract_option_symbol_from_lines(lines: list[str]) -> str:
+    consensus_symbol = extract_symbol_candidate_from_lines(lines)
+    direct_candidates: list[str] = []
+    for line in lines:
+        normalized_line = normalize_symbol_line(line)
+        match = re.search(r"\b([A-Z]{1,5}\s+\d+(?:\.\d+)?\s+(?:Call|Put))\b", normalized_line)
+        if match:
+            direct_candidates.append(match.group(1))
+    if direct_candidates:
+        chosen = normalize_symbol_line(direct_candidates[-1])
+        if consensus_symbol:
+            parts = chosen.split()
+            if len(parts) == 3 and len(parts[0]) == len(consensus_symbol):
+                similarity = SequenceMatcher(None, parts[0], consensus_symbol).ratio()
+                if similarity >= 0.7:
+                    return f"{consensus_symbol} {parts[1]} {parts[2]}"
+            if any(candidate.startswith(f"{consensus_symbol} ") for candidate in direct_candidates):
+                return next(
+                    candidate for candidate in reversed(direct_candidates) if candidate.startswith(f"{consensus_symbol} ")
+                )
+        return chosen
+
+    symbol = consensus_symbol
+    if not symbol:
+        return ""
+
+    for line in lines:
+        tokens = re.findall(r"[A-Za-z]+|\d+(?:\.\d+)?", clean_text(line))
+        upper_tokens = [token.upper() for token in tokens]
+        option_type = next(
+            (
+                "Call" if token.startswith("CA") else "Put"
+                for token in upper_tokens
+                if token in {"CALL", "PUT"} or SequenceMatcher(None, token, "CALL").ratio() >= 0.7 or SequenceMatcher(None, token, "PUT").ratio() >= 0.7
+            ),
+            "",
+        )
+        if not option_type:
+            continue
+        numeric_tokens = [
+            token
+            for token in tokens
+            if re.fullmatch(r"\d+(?:\.\d+)?", token)
+            and not (len(token) == 4 and token.startswith("20"))
+        ]
+        strike = ""
+        for token in reversed(numeric_tokens):
+            numeric_value = float(token)
+            if 5 <= numeric_value <= 1000:
+                strike = token.rstrip("0").rstrip(".") if "." in token else token
+                break
+        if strike:
+            return f"{symbol} {strike} {option_type}"
+    return ""
+
+
 def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
     normalized = [clean_text(line) for line in lines if clean_text(line)]
+    option_symbol = extract_option_symbol_from_lines(normalized)
+    if option_symbol:
+        remaining = [line for line in normalized if option_symbol not in clean_text(line)]
+        expiration = extract_expiration_from_lines(normalized)
+        if expiration and expiration not in remaining:
+            remaining.append(expiration)
+        return option_symbol, remaining
+
     option_candidates = [line for line in normalized if looks_like_option_symbol(line)]
     if not option_candidates:
         embedded_options: list[str] = []
@@ -1344,6 +1531,11 @@ def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
         symbol = normalize_symbol_line(equity_candidates[0])
         remaining = normalized[normalized.index(equity_candidates[0]) + 1 :]
         return symbol, remaining
+
+    extracted_symbol = extract_symbol_candidate_from_lines(normalized)
+    if extracted_symbol:
+        remaining = [line for line in normalized if extracted_symbol not in normalize_symbol_line(line)]
+        return extracted_symbol, remaining
 
     token_candidates: list[str] = []
     for line in normalized:
@@ -1381,14 +1573,21 @@ def parse_symbol_block(lines: list[str]) -> tuple[str, str, str, str]:
 
     symbol_line, remaining_lines = select_symbol_lines(cleaned)
     if symbol_line and (" Call" in symbol_line or " Put" in symbol_line):
-        expiration = ""
-        for candidate in cleaned:
-            if looks_like_expiration(candidate):
-                expiration = clean_text(candidate)
+        expiration = extract_expiration_from_lines(cleaned)
+        if not expiration:
+            for candidate in cleaned:
+                if looks_like_expiration(candidate):
+                    expiration = clean_text(candidate)
         return symbol_line, "option", "", expiration
 
     first = normalize_symbol_line(symbol_line or cleaned[0])
     if len(cleaned) == 1 or (symbol_line and not remaining_lines):
+        source_line = next((line for line in cleaned if symbol_line and symbol_line in normalize_symbol_line(line)), cleaned[0])
+        stripped_source = normalize_symbol_line(source_line)
+        if symbol_line and symbol_line in stripped_source:
+            description = normalize_description(stripped_source.split(symbol_line, 1)[1])
+            if description:
+                return symbol_line, "equity", description, ""
         tokens = first.split()
         if len(tokens) >= 1 and re.fullmatch(r"[A-Z]{1,5}", tokens[0]):
             description_tokens = tokens[1:]
@@ -1660,6 +1859,237 @@ def tesseract_row_record(
         row_items,
         column_ranges,
     )
+
+
+def tesseract_left_lines(
+    image: Image.Image,
+    geometry: RowGeometry,
+    section_cache: dict[SectionCacheKey, list[OcrItem]],
+) -> list[str]:
+    candidate_lines: list[str] = []
+    for variant, scale, psm in (("grayscale", 6, 6), ("binary", 8, 11)):
+        items = row_section_ocr_items(
+            image,
+            geometry,
+            (0.0, geometry.left_symbol_boundary),
+            section_cache,
+            scale=scale,
+            variant=variant,
+            psm=psm,
+        )
+        candidate_lines.extend(lines_from_crop_items(items))
+    deduped: list[str] = []
+    for line in candidate_lines:
+        normalized = clean_text(line)
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
+def tesseract_row_stream_fields(
+    image: Image.Image,
+    geometry: RowGeometry,
+    column_ranges: dict[str, tuple[float, float]],
+    section_cache: dict[SectionCacheKey, list[OcrItem]],
+) -> dict[str, str]:
+    band_items = row_section_ocr_items(
+        image,
+        geometry,
+        (column_ranges["last"][0], column_ranges["percent_total_gl"][1]),
+        section_cache,
+        scale=4,
+        variant="grayscale",
+        psm=11,
+    )
+    ordered_texts = [clean_text(item.text) for item in sorted(band_items, key=lambda entry: entry.x)]
+    stream: list[tuple[str, str]] = []
+    for text in ordered_texts:
+        if not text:
+            continue
+        for token in re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?%?", text):
+            if token.endswith("%"):
+                normalized = normalize_percent_text(token)
+                if normalized:
+                    stream.append(("percent", normalized))
+                continue
+            if "$" in token or token.startswith(("+$", "-$")):
+                normalized = normalize_money_text(token)
+                if normalized:
+                    stream.append(("money", normalized))
+                continue
+            if "." in token:
+                normalized = normalize_range_text(token)
+                if normalized:
+                    stream.append(("range", normalized))
+                continue
+            normalized = normalize_integer_text(token, signed=token.startswith("-"))
+            if normalized:
+                stream.append(("integer", normalized if not token.startswith("-") else f"-{normalized.lstrip('-')}"))
+
+    def next_value(kind: str) -> str:
+        for index, (candidate_kind, value) in enumerate(stream):
+            if candidate_kind != kind:
+                continue
+            stream.pop(index)
+            return value
+        return ""
+
+    return {
+        "last": next_value("money"),
+        "change": next_value("money"),
+        "percent_change": next_value("percent"),
+        "bid": next_value("money"),
+        "ask": next_value("money"),
+        "volume": next_value("integer"),
+        "day_range_low": next_value("range"),
+        "day_range_high": next_value("range"),
+        "week_52_low": next_value("range"),
+        "week_52_high": next_value("range"),
+        "avg_cost": next_value("money"),
+        "quantity": next_value("integer"),
+        "total_gl": next_value("money"),
+        "percent_total_gl": next_value("percent"),
+    }
+
+
+def adopt_raw_quantity_sign(record: dict[str, str], raw_fields: dict[str, str]) -> dict[str, str]:
+    repaired = dict(record)
+    parsed_quantity = repaired.get("quantity", "")
+    raw_quantity = normalize_field_value("quantity", raw_fields.get("quantity", ""))
+    if (
+        parsed_quantity
+        and raw_quantity.startswith("-")
+        and parsed_quantity.lstrip("-") == raw_quantity.lstrip("-")
+    ):
+        repaired["quantity"] = raw_quantity
+        return repaired
+    parsed_numeric = normalize_number(parsed_quantity)
+    raw_numeric = normalize_number(raw_quantity)
+    if (
+        repaired.get("instrument_type") == "option"
+        and parsed_numeric is not None
+        and raw_numeric is not None
+        and raw_quantity.startswith("-")
+        and abs(raw_numeric - parsed_numeric) <= max(3.0, abs(parsed_numeric) * 0.15)
+    ):
+        repaired["quantity"] = raw_quantity
+        return repaired
+    if (
+        repaired.get("instrument_type") == "equity"
+        and parsed_numeric is not None
+        and raw_numeric is not None
+        and abs(parsed_numeric) < 10
+        and abs(raw_numeric) >= 10
+    ):
+        repaired["quantity"] = raw_quantity
+    return repaired
+
+
+def repair_percent_change_from_price_fields(record: dict[str, str]) -> dict[str, str]:
+    repaired = dict(record)
+    last = normalize_number(repaired.get("last"))
+    change = normalize_number(repaired.get("change"))
+    percent_change = normalize_number(repaired.get("percent_change"))
+    if last is None or change is None:
+        return repaired
+    previous_close = last - change
+    if previous_close <= 0:
+        return repaired
+    implied = (change / previous_close) * 100.0
+    if percent_change is None or abs(percent_change - implied) > max(1.0, abs(implied) * 3.0):
+        repaired["percent_change"] = f"{implied:+.2f}%"
+    return repaired
+
+
+def repair_volume_quantity_swap(record: dict[str, str]) -> dict[str, str]:
+    repaired = dict(record)
+    volume = normalize_number(repaired.get("volume"))
+    quantity = normalize_number(repaired.get("quantity"))
+    if volume is None or quantity is None:
+        return repaired
+    if volume < 1000 and quantity > 10000:
+        repaired["volume"], repaired["quantity"] = repaired["quantity"], repaired["volume"]
+    return repaired
+
+
+def repair_position_pnl_fields(record: dict[str, str]) -> dict[str, str]:
+    repaired = dict(record)
+    last = normalize_number(repaired.get("last"))
+    avg_cost = normalize_number(repaired.get("avg_cost"))
+    quantity = normalize_number(repaired.get("quantity"))
+    total_gl = repaired.get("total_gl", "")
+    percent_total_gl = repaired.get("percent_total_gl", "")
+    if last is None or avg_cost is None or quantity is None or quantity == 0:
+        return repaired
+
+    implied_total = (last - avg_cost) * quantity
+    if total_gl and not total_gl.startswith(("+", "-")) and abs(implied_total) > 0.01:
+        sign = "-" if implied_total < 0 else "+"
+        repaired["total_gl"] = f"{sign}{total_gl.lstrip('+-')}"
+        if percent_total_gl and not percent_total_gl.startswith(("+", "-")):
+            repaired["percent_total_gl"] = f"{sign}{percent_total_gl.lstrip('+-')}"
+
+    normalized_percent_total = normalize_number(repaired.get("percent_total_gl"))
+    compact_percent = re.sub(r"[^0-9]", "", repaired.get("percent_total_gl", ""))
+    if (
+        normalized_percent_total is None
+        or abs(normalized_percent_total) < 0.1
+        or ("." not in repaired.get("percent_total_gl", "") and len(compact_percent) <= 2)
+    ):
+        basis = avg_cost * abs(quantity)
+        if basis > 0:
+            implied_percent = (implied_total / basis) * 100.0
+            repaired["percent_total_gl"] = f"{implied_percent:+.2f}%"
+    return repaired
+
+
+def repair_quantity_from_position(record: dict[str, str]) -> dict[str, str]:
+    repaired = dict(record)
+    instrument_type = repaired.get("instrument_type")
+    if instrument_type not in {"equity", "option"}:
+        return repaired
+    last = normalize_number(repaired.get("last"))
+    avg_cost = normalize_number(repaired.get("avg_cost"))
+    total_gl = normalize_number(repaired.get("total_gl"))
+    quantity = normalize_number(repaired.get("quantity"))
+    if last is None or avg_cost is None or total_gl is None or quantity is None:
+        return repaired
+    multiplier = 100.0 if instrument_type == "option" else 1.0
+    unit_gl = (last - avg_cost) * multiplier
+    if abs(unit_gl) < 0.01:
+        return repaired
+    implied_quantity = total_gl / unit_gl
+    rounded_quantity = round(implied_quantity)
+    if rounded_quantity < 1:
+        rounded_quantity = round(abs(implied_quantity))
+    if rounded_quantity < 1:
+        return repaired
+    if abs(quantity) < 10 or abs(quantity - implied_quantity) > max(5.0, abs(implied_quantity) * 0.25):
+        repaired["quantity"] = f"{rounded_quantity:,}" if instrument_type == "equity" else str(int(rounded_quantity))
+        if instrument_type == "option" and implied_quantity < 0:
+            repaired["quantity"] = f"-{repaired['quantity'].lstrip('-')}"
+    return repaired
+
+
+def repair_quantity_sign_from_position(record: dict[str, str]) -> dict[str, str]:
+    repaired = dict(record)
+    if repaired.get("instrument_type") != "option":
+        return repaired
+    last = normalize_number(repaired.get("last"))
+    avg_cost = normalize_number(repaired.get("avg_cost"))
+    total_gl = normalize_number(repaired.get("total_gl"))
+    quantity = repaired.get("quantity", "")
+    if last is None or avg_cost is None or total_gl is None or not quantity:
+        return repaired
+    unit_gl = (last - avg_cost) * 100.0
+    if abs(unit_gl) < 0.01:
+        return repaired
+    implied_quantity = total_gl / unit_gl
+    if implied_quantity < 0 and not quantity.startswith("-"):
+        repaired["quantity"] = f"-{quantity.lstrip('-')}"
+    if implied_quantity > 0 and quantity.startswith("-"):
+        repaired["quantity"] = quantity.lstrip("-")
+    return repaired
 
 
 def repair_tesseract_price_band(
@@ -2115,12 +2545,15 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
     selected = select_ocr_rows(image_path)
     rows = selected.rows
     column_ranges = selected.column_ranges
-    symbol_right_boundary = min(column_ranges["last"][0], 0.30)
     created_at = image_created_at(image_path).isoformat(timespec="seconds")
+    tesseract_primary = preferred_ocr_engine() == "tesseract"
+    active_column_ranges = dict(DEFAULT_COLUMN_RANGES) if tesseract_primary else column_ranges
+    symbol_right_boundary = min(active_column_ranges["last"][0], 0.30)
 
     records: list[dict[str, str]] = []
     pending_symbol_lines: list[str] = []
     current_record: dict[str, str] | None = None
+    last_equity_symbol = ""
     crop_cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]] = {}
     section_cache: dict[SectionCacheKey, list[OcrItem]] = {}
 
@@ -2134,52 +2567,121 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                 if current_record is not None:
                     records.append(finalize_record(current_record, image_path))
 
-                raw_fields = parse_main_row_raw(row, column_ranges)
+                raw_fields = parse_main_row_raw(row, active_column_ranges)
+                geometry = build_row_geometry(row, image.size[1], symbol_right_boundary)
                 candidate_lines = left_lines if select_symbol_lines(left_lines)[0] else pending_symbol_lines + left_lines
-                symbol, instrument_type, description, expiration = parse_symbol_block(candidate_lines)
-                raw_record = RawRecord(
-                    schema_name=SCHEMA_NAME,
-                    image_file=image_path.name,
-                    created_at=created_at,
-                    symbol=symbol,
-                    instrument_type=instrument_type,
-                    description=description,
-                    expiration=expiration,
-                    raw_fields=raw_fields,
-                    retried_fields=[],
-                )
-                current_record = {
-                    "schema_name": SCHEMA_NAME,
-                    "image_file": image_path.name,
-                    "created_at": created_at,
-                    "symbol": raw_record.symbol,
-                    "instrument_type": raw_record.instrument_type,
-                    "description": raw_record.description,
-                    "expiration": raw_record.expiration,
-                    **normalize_parsed_fields(raw_record.raw_fields),
-                }
-                current_record = repair_shifted_required_fields_from_raw(
-                    raw_record.raw_fields,
-                    current_record,
-                )
+                if tesseract_primary:
+                    targeted_left_lines = tesseract_left_lines(image, geometry, section_cache)
+                    symbol_lines = targeted_left_lines + pending_symbol_lines
+                    symbol, instrument_type, description, expiration = parse_symbol_block(symbol_lines)
+                    parsed_fields = tesseract_row_stream_fields(image, geometry, active_column_ranges, section_cache)
+                    current_record = {
+                        "schema_name": SCHEMA_NAME,
+                        "image_file": image_path.name,
+                        "created_at": created_at,
+                        "symbol": symbol,
+                        "instrument_type": instrument_type,
+                        "description": description,
+                        "expiration": expiration,
+                        **normalize_parsed_fields(parsed_fields),
+                    }
+                    raw_normalized = normalize_parsed_fields(raw_fields)
+                    for field_name, raw_value in raw_normalized.items():
+                        if field_name not in current_record or current_record.get(field_name):
+                            continue
+                        current_record[field_name] = raw_value
+                    current_record = adopt_raw_quantity_sign(current_record, raw_fields)
+                    current_record = repair_shifted_required_fields_from_raw(raw_fields, current_record)
+                    current_record = repair_percent_change_from_price_fields(current_record)
+                    current_record = repair_volume_quantity_swap(current_record)
+                    current_record = repair_position_pnl_fields(current_record)
+                    current_record = repair_quantity_from_position(current_record)
+                    if current_record.get("instrument_type") == "option":
+                        quantity_budget = OcrBudget(max_calls=3)
+                        quantity_texts = collect_cell_texts(
+                            "quantity",
+                            image,
+                            geometry,
+                            active_column_ranges["quantity"],
+                            quantity_budget,
+                            crop_cache,
+                            CELL_REPAIR_ATTEMPTS["quantity"],
+                        )
+                        quantity_candidate = normalize_field_value(
+                            "quantity",
+                            extract_best_field_value("quantity", quantity_texts),
+                        )
+                        if quantity_candidate:
+                            current_record["quantity"] = quantity_candidate
+                            current_record = adopt_raw_quantity_sign(current_record, raw_fields)
+                            current_record = repair_quantity_sign_from_position(current_record)
+                    if current_record.get("instrument_type") == "option" and last_equity_symbol:
+                        underlying = current_record.get("symbol", "").split(" ", 1)[0]
+                        if (
+                            underlying
+                            and len(underlying) == len(last_equity_symbol)
+                            and SequenceMatcher(None, underlying, last_equity_symbol).ratio() >= 0.7
+                        ):
+                            current_record["symbol"] = current_record["symbol"].replace(
+                                underlying,
+                                last_equity_symbol,
+                                1,
+                            )
+                else:
+                    symbol, instrument_type, description, expiration = parse_symbol_block(candidate_lines)
+                    raw_record = RawRecord(
+                        schema_name=SCHEMA_NAME,
+                        image_file=image_path.name,
+                        created_at=created_at,
+                        symbol=symbol,
+                        instrument_type=instrument_type,
+                        description=description,
+                        expiration=expiration,
+                        raw_fields=raw_fields,
+                        retried_fields=[],
+                    )
+                    current_record = {
+                        "schema_name": SCHEMA_NAME,
+                        "image_file": image_path.name,
+                        "created_at": created_at,
+                        "symbol": raw_record.symbol,
+                        "instrument_type": raw_record.instrument_type,
+                        "description": raw_record.description,
+                        "expiration": raw_record.expiration,
+                        **normalize_parsed_fields(raw_record.raw_fields),
+                    }
+                    current_record = repair_shifted_required_fields_from_raw(
+                        raw_record.raw_fields,
+                        current_record,
+                    )
                 current_record = reconcile_numeric_fields(current_record)
-                if record_needs_crop_repair(current_record):
-                    geometry = build_row_geometry(row, image.size[1], symbol_right_boundary)
+                needs_fallback = (
+                    not current_record.get("symbol")
+                    or current_record.get("instrument_type") == "unknown"
+                    or (
+                        current_record.get("instrument_type") == "option"
+                        and not current_record.get("expiration")
+                    )
+                    or any(field_needs_retry(field_name, current_record.get(field_name, "")) for field_name in required_fields())
+                )
+                if needs_fallback or (not tesseract_primary and record_needs_crop_repair(current_record)):
                     budget = OcrBudget()
                     current_record = repair_record_from_image_crop(
                         image=image,
                         geometry=geometry,
                         record=current_record,
-                        column_ranges=column_ranges,
+                        column_ranges=active_column_ranges,
                         budget=budget,
                         cache=crop_cache,
                         section_cache=section_cache,
                     )
+                if current_record.get("instrument_type") == "equity" and current_record.get("symbol"):
+                    last_equity_symbol = current_record["symbol"]
                 pending_symbol_lines = []
                 continue
 
             if is_range_row(row, column_ranges):
-                if current_record is not None:
+                if current_record is not None and not tesseract_primary:
                     attach_range_row(current_record, row, column_ranges)
                 continue
 
