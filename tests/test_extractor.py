@@ -259,6 +259,35 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertIn("ask", suspicious)
         self.assertIn("bid", suspicious)
 
+    def test_detect_suspicious_fields_marks_sign_conflict(self) -> None:
+        suspicious = extractor.detect_suspicious_fields(
+            {
+                "change": "$4.25",
+                "percent_change": "-3.1%",
+            }
+        )
+        self.assertIn("change", suspicious)
+        self.assertIn("percent_change", suspicious)
+
+    def test_sanitize_optional_fields_blanks_implausible_values(self) -> None:
+        sanitized = extractor.sanitize_optional_fields(
+            {
+                "last": "$64.82",
+                "bid": "$64.83",
+                "ask": "$64.84",
+                "day_range_low": "63.74",
+                "day_range_high": "65.33",
+                "week_52_low": "5421110.25",
+                "avg_cost": "$0.39",
+                "total_gl": "+$163.83",
+                "percent_total_gl": "-0.65%",
+            }
+        )
+        self.assertEqual(sanitized["week_52_low"], "")
+        self.assertEqual(sanitized["avg_cost"], "")
+        self.assertEqual(sanitized["total_gl"], "")
+        self.assertEqual(sanitized["percent_total_gl"], "")
+
 
 class ExtractorContractTests(unittest.TestCase):
     def test_parse_main_row_normalizes_sample_like_numeric_noise(self) -> None:
@@ -475,6 +504,29 @@ class ExtractorContractTests(unittest.TestCase):
         }
 
         extractor.validate_required_fields(record, Path("fixture_input.png"))
+
+    def test_validate_cross_field_consistency_rejects_last_outside_day_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Last is outside day range"):
+            extractor.validate_cross_field_consistency(
+                {
+                    "symbol": "GOOGL 340 Call",
+                    "last": "$21.55",
+                    "day_range_low": "27.49",
+                    "day_range_high": "29.30",
+                },
+                Path("fixture_input.png"),
+            )
+
+    def test_validate_cross_field_consistency_rejects_change_sign_conflict(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Change sign conflicts"):
+            extractor.validate_cross_field_consistency(
+                {
+                    "symbol": "FDIG",
+                    "change": "$4.25",
+                    "percent_change": "-3.1%",
+                },
+                Path("fixture_input.png"),
+            )
 
     def test_timestamp_only_output_filename(self) -> None:
         file_name = extractor.csv_name(sample_created_at())

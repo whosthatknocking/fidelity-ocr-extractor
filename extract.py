@@ -798,6 +798,19 @@ def normalize_number(text: str | None) -> float | None:
         return None
 
 
+def sign_of(text: str | None) -> int:
+    if not text:
+        return 0
+    stripped = str(text).strip()
+    if stripped.startswith("-"):
+        return -1
+    if stripped.startswith("+"):
+        return 1
+    if normalize_number(stripped) is not None:
+        return 1
+    return 0
+
+
 def format_price(value: float, *, signed: bool = False, positive_sign: bool = False) -> str:
     sign = ""
     absolute = value
@@ -945,6 +958,66 @@ def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
         reconciled["day_range_low"] = f"{min(numeric_prices + [day_low, day_high]):.2f}"
         reconciled["day_range_high"] = f"{max(numeric_prices + [day_low, day_high]):.2f}"
     return reconciled
+
+
+def sanitize_optional_fields(record: dict[str, str]) -> dict[str, str]:
+    sanitized = dict(record)
+    price_refs = [
+        value
+        for value in (
+            normalize_number(sanitized.get("last")),
+            normalize_number(sanitized.get("bid")),
+            normalize_number(sanitized.get("ask")),
+            normalize_number(sanitized.get("day_range_low")),
+            normalize_number(sanitized.get("day_range_high")),
+        )
+        if value is not None
+    ]
+    if price_refs:
+        ref_min = min(price_refs)
+        ref_max = max(price_refs)
+        for field_name in ("week_52_low", "week_52_high"):
+            numeric_value = normalize_number(sanitized.get(field_name))
+            if numeric_value is None:
+                continue
+            if numeric_value < max(0.01, ref_min * 0.2) or numeric_value > ref_max * 5.0:
+                sanitized[field_name] = ""
+
+        avg_cost = normalize_number(sanitized.get("avg_cost"))
+        if avg_cost is not None and (avg_cost < max(0.01, ref_min * 0.25) or avg_cost > ref_max * 5.0):
+            sanitized["avg_cost"] = ""
+
+    total_gl_sign = sign_of(sanitized.get("total_gl"))
+    percent_total_gl_sign = sign_of(sanitized.get("percent_total_gl"))
+    if total_gl_sign and percent_total_gl_sign and total_gl_sign != percent_total_gl_sign:
+        sanitized["total_gl"] = ""
+        sanitized["percent_total_gl"] = ""
+
+    return sanitized
+
+
+def parsed_row_quality(parsed: dict[str, str]) -> int:
+    score = 0
+    for field_name in required_fields():
+        value = parsed.get(field_name, "")
+        if value and is_valid_field_value(field_name, value):
+            score += 2
+    bid = normalize_number(parsed.get("bid"))
+    ask = normalize_number(parsed.get("ask"))
+    last = normalize_number(parsed.get("last"))
+    day_low = normalize_number(parsed.get("day_range_low"))
+    day_high = normalize_number(parsed.get("day_range_high"))
+    if bid is not None and ask is not None and bid <= ask:
+        score += 2
+    if day_low is not None and day_high is not None and day_low <= day_high:
+        score += 2
+    if last is not None and day_low is not None and day_high is not None and day_low <= last <= day_high:
+        score += 2
+    change_sign = sign_of(parsed.get("change"))
+    percent_sign = sign_of(parsed.get("percent_change"))
+    if change_sign and percent_sign and change_sign == percent_sign:
+        score += 2
+    return score
 
 
 def field_needs_retry(field_name: str, value: str) -> bool:
@@ -1454,6 +1527,7 @@ def validate_field_shapes(record: dict[str, str], image_path: Path) -> None:
 def validate_cross_field_consistency(record: dict[str, str], image_path: Path) -> None:
     bid = normalize_number(record.get("bid"))
     ask = normalize_number(record.get("ask"))
+    last = normalize_number(record.get("last"))
     day_low = normalize_number(record.get("day_range_low"))
     day_high = normalize_number(record.get("day_range_high"))
     if bid is not None and ask is not None and bid > ask:
@@ -1461,6 +1535,16 @@ def validate_cross_field_consistency(record: dict[str, str], image_path: Path) -
     if day_low is not None and day_high is not None and day_low > day_high:
         raise ValueError(
             f"Day range low exceeds high for {image_path.name}: {record.get('symbol', '')}"
+        )
+    if last is not None and day_low is not None and day_high is not None and not (day_low <= last <= day_high):
+        raise ValueError(
+            f"Last is outside day range for {image_path.name}: {record.get('symbol', '')}"
+        )
+    change_sign = sign_of(record.get("change"))
+    percent_sign = sign_of(record.get("percent_change"))
+    if change_sign and percent_sign and change_sign != percent_sign:
+        raise ValueError(
+            f"Change sign conflicts with percent change for {image_path.name}: {record.get('symbol', '')}"
         )
 
 
@@ -1479,6 +1563,10 @@ def detect_suspicious_fields(record: dict[str, str]) -> set[str]:
     if last is not None and day_low is not None and day_high is not None:
         if last < day_low or last > day_high:
             suspicious.update({"last", "day_range_low", "day_range_high"})
+    change_sign = sign_of(record.get("change"))
+    percent_sign = sign_of(record.get("percent_change"))
+    if change_sign and percent_sign and change_sign != percent_sign:
+        suspicious.update({"change", "percent_change"})
     if day_low is not None and day_high is not None:
         floor = max(0.0, day_low - 1.0)
         ceiling = day_high + 1.0
@@ -1495,7 +1583,7 @@ def finalize_record(record: dict[str, str] | None, image_path: Path) -> dict[str
     if record is None:
         return None
     validate_required_fields(record, image_path)
-    finalized = dict(record)
+    finalized = sanitize_optional_fields(record)
     validate_field_shapes(finalized, image_path)
     validate_cross_field_consistency(finalized, image_path)
     finalized.pop("_retried_fields", None)
@@ -1535,6 +1623,17 @@ def select_ocr_rows(image_path: Path) -> SelectedRows:
             anchors = extract_header_anchors(header_row)
             score += 100 + (10 * len(anchors))
             current_missing = [key for key in required_header_keys() if key not in anchors]
+            column_ranges = derive_column_ranges(header_row)
+            sample_count = 0
+            for row in rows:
+                if row is header_row:
+                    continue
+                if not is_main_data_row(row, column_ranges):
+                    continue
+                score += parsed_row_quality(parse_main_row(row, column_ranges))
+                sample_count += 1
+                if sample_count >= 4:
+                    break
         if score > best_score:
             best_rows = rows
             best_header = header_row
