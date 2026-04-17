@@ -32,9 +32,13 @@ Required for every extracted monitoring row:
 - `ask`
 - `volume`
 - `quantity`
+
+Optional on individual rows even though their headers are required:
+
 - `day_range_low`
 - `day_range_high`
-Optional when the 52-week range is not visible in the screenshot:
-
 - `week_52_low`
 - `week_52_high`
+- `avg_cost`
+- `total_gl`
+- `percent_total_gl`

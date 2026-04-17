@@ -14,8 +14,9 @@ The extractor creates CSV files in `output/`. If a matching output file already 
 Notes:
 
 - The parser calibrates itself from the monitoring header row, so the browser window can be wider or narrower without needing a single fixed screenshot size.
-- If the screenshot does not expose the required monitoring columns clearly enough to recover `symbol`, `last`, `change`, `% change`, `bid`, `ask`, `volume`, `quantity`, and `day range`, extraction fails instead of writing partial data.
-- `52-week range` is extracted when visible, but missing `week_52_low` and `week_52_high` do not fail extraction.
+- Required headers are strict: `Symbol`, `Last`, `Change`, `% Change`, `Bid`, `Ask`, `Volume`, `Day range`, `52-week range`, `Avg. cost`, `Quantity`, `$ Total G/L`, and `% Total G/L` must be OCR’d exactly or extraction fails.
+- The required CSV fields are configured in `fidelity_extractor.toml`; by default they are `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, and `quantity`.
+- `Day range`, `52-week range`, `Avg. cost`, `$ Total G/L`, and `% Total G/L` headers must be present, but their row values may be blank.
 - Screenshots that fail image quality gates or cross-field validation are rejected instead of being exported with low-confidence rows.
 
 ## Install dependencies

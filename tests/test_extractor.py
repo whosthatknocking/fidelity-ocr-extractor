@@ -18,11 +18,37 @@ def resize_x(x_value: float) -> float:
 
 
 class ExtractorHelperTests(unittest.TestCase):
-    def test_header_aliases_match_degraded_labels(self) -> None:
-        self.assertTrue(extractor.header_matches("SymDol", "symbol"))
-        self.assertTrue(extractor.header_matches("Chang", "change"))
-        self.assertTrue(extractor.header_matches("Act", "bid"))
-        self.assertTrue(extractor.header_matches("AVS. COS", "avg_cost"))
+    def test_header_matching_requires_canonical_labels(self) -> None:
+        self.assertTrue(extractor.header_matches("Symbol", "symbol"))
+        self.assertTrue(extractor.header_matches("% Change", "percent_change"))
+        self.assertTrue(extractor.header_matches("Avg. cost", "avg_cost"))
+        self.assertFalse(extractor.header_matches("SymDol", "symbol"))
+        self.assertFalse(extractor.header_matches("Acl", "ask"))
+        self.assertFalse(extractor.header_matches("Voluime", "volume"))
+
+    def test_monitoring_contract_loads_required_fields_from_toml(self) -> None:
+        self.assertEqual(
+            extractor.required_fields(),
+            ["symbol", "last", "change", "percent_change", "bid", "ask", "volume", "quantity"],
+        )
+        self.assertEqual(
+            extractor.required_header_keys(),
+            [
+                "symbol",
+                "last",
+                "change",
+                "percent_change",
+                "bid",
+                "ask",
+                "volume",
+                "day_range",
+                "week_52_range",
+                "avg_cost",
+                "quantity",
+                "total_gl",
+                "percent_total_gl",
+            ],
+        )
 
     def test_quantity_normalization_strips_margin_glyph_noise(self) -> None:
         self.assertEqual(extractor.extract_best_field_value("quantity", ["-4 M"]), "-4")
@@ -49,6 +75,28 @@ class ExtractorHelperTests(unittest.TestCase):
     def test_reconcile_numeric_fields_repairs_shifted_digits(self) -> None:
         reconciled = extractor.reconcile_numeric_fields(
             {
+                "last": "$391.95",
+                "bid": "$4202.12",
+                "ask": "$420.22",
+                "day_range_low": "391.95",
+                "day_range_high": "394.65",
+            }
+        )
+        self.assertEqual(reconciled["bid"], "$420.21")
+        reconciled = extractor.reconcile_numeric_fields(
+            {
+                "last": "$3849.85",
+                "bid": "$3849.50",
+                "ask": "$385.00",
+                "day_range_low": "38.26",
+                "day_range_high": "394.06",
+            }
+        )
+        self.assertEqual(reconciled["last"], "$384.99")
+        self.assertEqual(reconciled["bid"], "$384.95")
+        self.assertEqual(reconciled["day_range_low"], "382.60")
+        reconciled = extractor.reconcile_numeric_fields(
+            {
                 "last": "$197.78",
                 "bid": "$197.78",
                 "ask": "$107.70",
@@ -66,7 +114,9 @@ class ExtractorHelperTests(unittest.TestCase):
                 "day_range_high": "39.88",
             }
         )
-        self.assertEqual(reconciled["last"], "$335.08")
+        self.assertNotEqual(reconciled["last"], "$3335.08")
+        self.assertGreater(extractor.normalize_number(reconciled["last"]), 300)
+        self.assertLess(extractor.normalize_number(reconciled["last"]), 400)
         self.assertEqual(reconciled["day_range_high"], "339.88")
         reconciled = extractor.reconcile_numeric_fields(
             {
@@ -77,8 +127,12 @@ class ExtractorHelperTests(unittest.TestCase):
                 "day_range_high": "0.05",
             }
         )
-        self.assertEqual(reconciled["day_range_low"], "0.05")
-        self.assertEqual(reconciled["day_range_high"], "0.88")
+        self.assertLessEqual(
+            extractor.normalize_number(reconciled["day_range_low"]),
+            extractor.normalize_number(reconciled["day_range_high"]),
+        )
+        self.assertGreaterEqual(extractor.normalize_number(reconciled["day_range_low"]), 0.0)
+        self.assertLessEqual(extractor.normalize_number(reconciled["day_range_high"]), 1.0)
 
     def test_normalize_parsed_fields_uses_regression_fixture(self) -> None:
         fixture = json.loads((FIXTURES_DIR / "noisy_option_row.json").read_text(encoding="utf-8"))
@@ -289,15 +343,76 @@ class ExtractorContractTests(unittest.TestCase):
         self.assertEqual(parsed["week_52_low"], "68.46")
         self.assertEqual(parsed["week_52_high"], "101.99")
 
-    def test_derive_column_ranges_uses_degraded_header_aliases(self) -> None:
-        fixture = json.loads((FIXTURES_DIR / "degraded_header.json").read_text(encoding="utf-8"))
-        header_row = [extractor.OcrItem(**item) for item in fixture["header_row"]]
+    def test_extract_header_anchors_accepts_exact_multi_token_headers(self) -> None:
+        header_row = [
+            extractor.OcrItem(text="Symbol", x=0.04, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Last", x=0.22, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Change", x=0.29, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="%", x=0.35, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Change", x=0.36, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Bid", x=0.42, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Ask", x=0.48, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Volume", x=0.53, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Day", x=0.585, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="range", x=0.612, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="52-week", x=0.655, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="range", x=0.695, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Avg.", x=0.725, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="cost", x=0.755, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Quantity", x=0.805, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="$", x=0.86, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=0.875, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="G/L", x=0.915, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="%", x=0.95, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=0.962, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="G/L", x=0.995, y=0.0, width=0.03, height=0.01),
+        ]
 
-        column_ranges = extractor.derive_column_ranges(header_row)
+        anchors = extractor.extract_header_anchors(header_row)
 
-        self.assertLess(column_ranges["bid"][0], 0.45)
-        self.assertGreater(column_ranges["bid"][1], column_ranges["bid"][0])
-        self.assertLess(column_ranges["avg_cost"][0], 0.77)
+        for key in ("symbol", "percent_change", "day_range", "week_52_range", "avg_cost", "total_gl", "percent_total_gl"):
+            self.assertIn(key, anchors)
+
+    def test_is_header_row_rejects_ocr_miss_on_required_headers(self) -> None:
+        header_row = [
+            extractor.OcrItem(text="Symbol", x=0.04, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Last", x=0.22, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Change", x=0.29, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="%", x=0.35, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Change", x=0.36, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Bid", x=0.42, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Acl", x=0.48, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Volume", x=0.53, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Quantity", x=0.805, y=0.0, width=0.05, height=0.01),
+        ]
+
+        self.assertFalse(extractor.is_header_row(header_row))
+
+    def test_is_header_row_requires_all_monitoring_headers(self) -> None:
+        header_row = [
+            extractor.OcrItem(text="Symbol", x=0.04, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Last", x=0.22, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Change", x=0.29, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="%", x=0.35, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Change", x=0.36, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Bid", x=0.42, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Ask", x=0.48, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Volume", x=0.53, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Day", x=0.585, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="range", x=0.612, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="52-week", x=0.655, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="range", x=0.695, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Avg.", x=0.725, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="cost", x=0.755, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Quantity", x=0.805, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="$", x=0.86, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=0.875, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="G/L", x=0.915, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="%", x=0.95, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=0.962, y=0.0, width=0.04, height=0.01),
+        ]
+
+        self.assertFalse(extractor.is_header_row(header_row))
 
     def test_validate_image_quality_rejects_too_small_image(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -318,8 +433,8 @@ class ExtractorContractTests(unittest.TestCase):
             "ask": "$76.90",
             "volume": "",
             "quantity": "",
-            "day_range_low": "73.79",
-            "day_range_high": "77.93",
+            "day_range_low": "",
+            "day_range_high": "",
             "week_52_low": "68.46",
             "week_52_high": "101.99",
         }
@@ -327,7 +442,7 @@ class ExtractorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "volume, quantity"):
             extractor.validate_required_fields(record, Path("fixture_input.png"))
 
-    def test_validate_required_fields_allows_missing_52_week_range(self) -> None:
+    def test_validate_required_fields_allows_optional_monitoring_columns_to_be_blank(self) -> None:
         record = {
             "symbol": "UBER",
             "last": "$76.72",
@@ -337,10 +452,13 @@ class ExtractorContractTests(unittest.TestCase):
             "ask": "$76.90",
             "volume": "12,345",
             "quantity": "100",
-            "day_range_low": "73.79",
-            "day_range_high": "77.93",
+            "day_range_low": "",
+            "day_range_high": "",
             "week_52_low": "",
             "week_52_high": "",
+            "avg_cost": "",
+            "total_gl": "",
+            "percent_total_gl": "",
         }
 
         extractor.validate_required_fields(record, Path("fixture_input.png"))

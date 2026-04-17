@@ -23,10 +23,12 @@
 - Only PNG files inside `input/` are eligible for extraction.
 - Output filenames must start with `positions_monitoring_` and use only the derived timestamp as the suffix.
 - The CSV schema is fixed to the current monitoring fields emitted by `extract.py`.
+- The monitoring extraction contract, including required CSV fields and canonical header labels, lives in `fidelity_extractor.toml`.
 - `created_at` must come from the PNG creation time when available.
 - Re-running the extractor must check every file in `input/` and skip only when the deterministic output file already exists.
 - Extraction must adapt to browser-size and screenshot-resolution changes by calibrating column positions from the detected monitoring header row.
-- Extraction must reject screenshots that fail basic image quality gates or do not expose enough recognizable header anchors.
+- Extraction must reject screenshots that fail basic image quality gates or do not expose all monitoring headers exactly.
 - Extraction must separate raw OCR collection from normalization and validation.
-- `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, `quantity`, `day_range_low`, and `day_range_high` are required monitoring fields and must not be emitted as blank values.
-- `week_52_low` and `week_52_high` remain part of the CSV schema but may be blank when that range is not visible in the screenshot.
+- Required monitoring fields are defined by `monitoring.required_fields` in `fidelity_extractor.toml`; the current required set is `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, and `quantity`.
+- All monitoring header labels are required and are defined by `monitoring.required_header_keys` plus `monitoring.headers` in `fidelity_extractor.toml`.
+- `day_range_low`, `day_range_high`, `week_52_low`, `week_52_high`, `avg_cost`, `total_gl`, and `percent_total_gl` remain part of the CSV schema but may be blank on individual rows even though their headers are always required.

@@ -1,0 +1,41 @@
+[monitoring]
+required_fields = [
+  "symbol",
+  "last",
+  "change",
+  "percent_change",
+  "bid",
+  "ask",
+  "volume",
+  "quantity",
+]
+required_header_keys = [
+  "symbol",
+  "last",
+  "change",
+  "percent_change",
+  "bid",
+  "ask",
+  "volume",
+  "day_range",
+  "week_52_range",
+  "avg_cost",
+  "quantity",
+  "total_gl",
+  "percent_total_gl",
+]
+
+[monitoring.headers]
+symbol = "Symbol"
+last = "Last"
+change = "Change"
+percent_change = "% Change"
+bid = "Bid"
+ask = "Ask"
+volume = "Volume"
+day_range = "Day range"
+week_52_range = "52-week range"
+avg_cost = "Avg. cost"
+quantity = "Quantity"
+total_gl = "$ Total G/L"
+percent_total_gl = "% Total G/L"

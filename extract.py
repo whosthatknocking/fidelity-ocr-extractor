@@ -13,6 +13,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from functools import lru_cache
 from typing import Iterable
 from typing import NamedTuple
 
@@ -21,10 +22,16 @@ from PIL import ImageFilter
 from PIL import ImageOps
 from PIL import ImageStat
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.9/3.10 fallback
+    import tomli as tomllib
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 INPUT_DIR = REPO_ROOT / "input"
 OUTPUT_DIR = REPO_ROOT / "output"
+CONFIG_PATH = REPO_ROOT / "fidelity_extractor.toml"
 SCHEMA_NAME = "monitoring"
 OUTPUT_PREFIX = "positions_monitoring"
 
@@ -137,22 +144,6 @@ DEFAULT_HEADER_CENTERS = {
     "percent_total_gl": 0.975,
 }
 
-HEADER_ALIASES = {
-    "symbol": ("symbol", "symdol", "symboi", "symbo1"),
-    "last": ("last",),
-    "change": ("change", "chang"),
-    "percent_change": ("% change", "percent change", "%change"),
-    "bid": ("bid", "bld", "8id", "act"),
-    "ask": ("ask",),
-    "volume": ("volume", "volurne"),
-    "day_range": ("day range", "dayrange"),
-    "week_52_range": ("52-week range", "52 week range", "52-weekrange"),
-    "avg_cost": ("avg cost", "avs cos", "avg cos"),
-    "quantity": ("quantity",),
-    "total_gl": ("$ total g/l", "total g/l", "$ total gl"),
-    "percent_total_gl": ("% total g/l", "% total gl"),
-}
-
 OUTPUT_FIELDS = [
     "schema_name",
     "image_file",
@@ -211,44 +202,16 @@ CELL_REPAIR_ATTEMPTS = {
     "week_52_high": [(1.1, 10, None)],
 }
 
-REQUIRED_FIELDS = [
-    "symbol",
-    "last",
-    "change",
-    "percent_change",
-    "bid",
-    "ask",
-    "volume",
-    "quantity",
-    "day_range_low",
-    "day_range_high",
-]
-
 MONEY_FIELDS = {"last", "bid", "ask", "avg_cost", "total_gl", "change"}
 PERCENT_FIELDS = {"percent_change", "percent_total_gl"}
 INTEGER_FIELDS = {"volume", "quantity"}
 RANGE_FIELDS = {"day_range_low", "day_range_high", "week_52_low", "week_52_high"}
-HEADER_REQUIRED_KEYS = {
-    "symbol",
-    "last",
-    "change",
-    "percent_change",
-    "bid",
-    "ask",
-    "volume",
-    "day_range",
-    "avg_cost",
-    "quantity",
-    "total_gl",
-    "percent_total_gl",
-}
 MIN_IMAGE_WIDTH = 1200
 MIN_IMAGE_HEIGHT = 700
 MIN_IMAGE_STDDEV = 18.0
 MAX_CELL_OCR_CALLS = 24
 HEADER_OCR_VARIANTS = ["grayscale", "contrast", "sharpen", "binary"]
 CELL_OCR_VARIANTS = ("grayscale", "binary")
-RETRY_PRIORITY_FIELDS = REQUIRED_FIELDS + ["last", "change", "percent_total_gl", "total_gl", "avg_cost"]
 
 
 class ImageQualityError(ValueError):
@@ -257,6 +220,52 @@ class ImageQualityError(ValueError):
 
 class OcrBudgetExceededError(RuntimeError):
     pass
+
+
+@lru_cache(maxsize=1)
+def load_monitoring_contract() -> dict[str, object]:
+    with CONFIG_PATH.open("rb") as handle:
+        config = tomllib.load(handle)
+    try:
+        monitoring = config["monitoring"]
+    except KeyError as exc:  # pragma: no cover - config file is repository contract
+        raise ValueError(f"Missing [monitoring] configuration in {CONFIG_PATH.name}") from exc
+
+    headers = monitoring.get("headers", {})
+    required_fields = monitoring.get("required_fields", [])
+    required_header_keys = monitoring.get("required_header_keys", [])
+
+    if not isinstance(headers, dict) or not headers:
+        raise ValueError(f"{CONFIG_PATH.name} must define [monitoring.headers]")
+    for key in required_header_keys:
+        if key not in headers:
+            raise ValueError(f"{CONFIG_PATH.name} missing header mapping for {key}")
+
+    return {
+        "headers": {key: normalize_header_label(str(value)) for key, value in headers.items()},
+        "required_fields": [str(value) for value in required_fields],
+        "required_header_keys": [str(value) for value in required_header_keys],
+    }
+
+
+def header_contract() -> dict[str, str]:
+    return load_monitoring_contract()["headers"]  # type: ignore[return-value]
+
+
+def required_fields() -> list[str]:
+    return list(load_monitoring_contract()["required_fields"])  # type: ignore[return-value]
+
+
+def required_header_keys() -> list[str]:
+    return list(load_monitoring_contract()["required_header_keys"])  # type: ignore[return-value]
+
+
+def retry_priority_fields() -> list[str]:
+    ordered: list[str] = []
+    for field_name in required_fields() + ["percent_total_gl", "total_gl", "avg_cost"]:
+        if field_name not in ordered:
+            ordered.append(field_name)
+    return ordered
 
 
 @dataclass(frozen=True)
@@ -374,7 +383,31 @@ def normalize_header_label(text: str) -> str:
 
 def header_matches(text: str, key: str) -> bool:
     normalized = normalize_header_label(text)
-    return any(alias in normalized for alias in HEADER_ALIASES[key])
+    return normalized == header_contract()[key]
+
+
+def extract_header_anchors(header_row: list[OcrItem]) -> dict[str, float]:
+    anchors: dict[str, float] = {}
+    ordered = sorted(header_row, key=lambda entry: entry.x)
+    normalized_items = [normalize_header_label(item.text) for item in ordered]
+    label_to_key = {label: key for key, label in header_contract().items()}
+    used_indexes: set[int] = set()
+
+    for span in (3, 2, 1):
+        for start in range(0, len(ordered) - span + 1):
+            indexes = set(range(start, start + span))
+            if indexes & used_indexes:
+                continue
+            label = " ".join(normalized_items[start : start + span]).strip()
+            key = label_to_key.get(label)
+            if not key or key in anchors:
+                continue
+            left_item = ordered[start]
+            right_item = ordered[start + span - 1]
+            anchors[key] = (left_item.x + (right_item.x + right_item.width)) / 2
+            used_indexes.update(indexes)
+
+    return anchors
 
 
 def preprocess_for_ocr(image: Image.Image, variant: str) -> Image.Image:
@@ -477,51 +510,7 @@ def derive_column_ranges(header_row: list[OcrItem] | None) -> dict[str, tuple[fl
     if not header_row:
         return dict(DEFAULT_COLUMN_RANGES)
 
-    anchors: dict[str, float] = {}
-    ordered = sorted(header_row, key=lambda entry: entry.x)
-    for index, item in enumerate(ordered):
-        text = normalize_header_label(item.text)
-        previous_text = (
-            normalize_header_label(ordered[index - 1].text) if index > 0 else ""
-        )
-        next_text = (
-            normalize_header_label(ordered[index + 1].text) if index + 1 < len(ordered) else ""
-        )
-        item_center = item.x + (item.width / 2)
-
-        if header_matches(text, "symbol"):
-            anchors["symbol"] = item_center
-        elif header_matches(text, "last"):
-            anchors["last"] = item_center
-        elif header_matches(text, "bid"):
-            anchors["bid"] = item_center
-        elif header_matches(text, "ask"):
-            anchors["ask"] = item_center
-        elif header_matches(text, "volume"):
-            anchors["volume"] = item_center
-        elif header_matches(text, "quantity"):
-            anchors["quantity"] = item_center
-        elif header_matches(text, "avg_cost"):
-            anchors["avg_cost"] = item_center
-        elif header_matches(text, "day_range"):
-            anchors["day_range"] = item_center
-        elif header_matches(text, "week_52_range"):
-            anchors["week_52_range"] = item_center
-        elif header_matches(text, "percent_total_gl"):
-            anchors["percent_total_gl"] = item_center
-        elif header_matches(text, "total_gl"):
-            anchors["total_gl"] = item_center
-        elif header_matches(text, "percent_change"):
-            anchors["percent_change"] = item_center
-        elif "%" in text and "change" in next_text:
-            next_item = ordered[index + 1]
-            anchors["percent_change"] = (item.x + (next_item.x + next_item.width)) / 2
-        elif "change" in text and "%" in previous_text:
-            if "percent_change" not in anchors:
-                previous = ordered[index - 1]
-                anchors["percent_change"] = (previous.x + (item.x + item.width)) / 2
-        elif "change" in text:
-            anchors["change"] = item_center
+    anchors = extract_header_anchors(header_row)
 
     derived: dict[str, tuple[float, float]] = {}
     for name, (left, right) in DEFAULT_COLUMN_RANGES.items():
@@ -565,13 +554,8 @@ def looks_numeric(text: str) -> bool:
 
 
 def is_header_row(row: list[OcrItem]) -> bool:
-    text = " ".join(item.text for item in row)
-    normalized = normalize_header_label(text)
-    return (
-        header_matches(normalized, "symbol")
-        and header_matches(normalized, "last")
-        and header_matches(normalized, "quantity")
-    )
+    anchors = extract_header_anchors(row)
+    return all(key in anchors for key in required_header_keys())
 
 
 def is_main_data_row(row: list[OcrItem], column_ranges: dict[str, tuple[float, float]]) -> bool:
@@ -772,8 +756,26 @@ def repair_price_from_context(value: str, context: str) -> str:
     if len(value_whole) == len(context_whole) and len(context_whole) >= 2:
         candidate_text = f"{context_whole[:-1]}{value_whole[-1]}.{value_frac}"
         candidate = float(candidate_text)
-        if abs(candidate - numeric_context) < abs(numeric_value - numeric_context):
+        if (
+            numeric_context * 0.5 <= candidate <= numeric_context * 1.5
+            and abs(candidate - numeric_context) < abs(numeric_value - numeric_context)
+        ):
             return format_price(candidate)
+    return value
+
+
+def repair_price_magnitude(value: str, reference: str) -> str:
+    numeric_value = normalize_number(value)
+    numeric_reference = normalize_number(reference)
+    if numeric_value is None or numeric_reference is None or numeric_reference <= 0:
+        return value
+    candidate = numeric_value
+    while candidate > numeric_reference * 3.0:
+        candidate /= 10.0
+    while candidate < numeric_reference * 0.3:
+        candidate *= 10.0
+    if abs(candidate - numeric_reference) < abs(numeric_value - numeric_reference):
+        return format_price(candidate)
     return value
 
 
@@ -799,8 +801,34 @@ def repair_range_from_references(value: str, references: list[str]) -> str:
     return value
 
 
+def repair_range_magnitude(value: str, references: list[str]) -> str:
+    numeric_value = normalize_number(value)
+    numeric_refs = [reference for reference in (normalize_number(item) for item in references) if reference is not None]
+    if numeric_value is None or not numeric_refs:
+        return value
+    candidate = numeric_value
+    ref_min = min(numeric_refs)
+    ref_max = max(numeric_refs)
+    while candidate > ref_max * 1.5:
+        candidate /= 10.0
+    while candidate < ref_min * 0.5:
+        candidate *= 10.0
+    if abs(candidate - ref_min) < abs(numeric_value - ref_min) or abs(candidate - ref_max) < abs(numeric_value - ref_max):
+        return f"{candidate:.2f}"
+    return value
+
+
 def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
     reconciled = dict(record)
+    if reconciled.get("last"):
+        reference_price = reconciled.get("ask") or reconciled.get("bid") or reconciled.get("last", "")
+        reconciled["last"] = repair_price_magnitude(reconciled["last"], reference_price)
+    if reconciled.get("last"):
+        for field_name in ("bid", "ask"):
+            if reconciled.get(field_name):
+                reconciled[field_name] = repair_price_magnitude(
+                    reconciled[field_name], reconciled["last"]
+                )
     if reconciled.get("bid") and reconciled.get("ask"):
         reconciled["ask"] = repair_price_from_context(
             reconciled["ask"], reconciled.get("bid", "")
@@ -823,8 +851,14 @@ def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
         reconciled["day_range_low"] = repair_range_from_references(
             reconciled["day_range_low"], price_refs
         )
+        reconciled["day_range_low"] = repair_range_magnitude(
+            reconciled["day_range_low"], price_refs
+        )
     if reconciled.get("day_range_high"):
         reconciled["day_range_high"] = repair_range_from_references(
+            reconciled["day_range_high"], price_refs
+        )
+        reconciled["day_range_high"] = repair_range_magnitude(
             reconciled["day_range_high"], price_refs
         )
 
@@ -838,7 +872,7 @@ def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
 
 
 def field_needs_retry(field_name: str, value: str) -> bool:
-    if field_name in REQUIRED_FIELDS and not value:
+    if field_name in required_fields() and not value:
         return True
     if not value:
         return False
@@ -1281,7 +1315,7 @@ def repair_record_from_image_crop(
     field_texts: dict[str, list[str]] = {}
     suspicious_fields = detect_suspicious_fields(record)
     retry_fields = []
-    for field_name in RETRY_PRIORITY_FIELDS:
+    for field_name in retry_priority_fields():
         if field_name in column_ranges and field_name not in retry_fields:
             retry_fields.append(field_name)
     for field_name in suspicious_fields:
@@ -1310,7 +1344,7 @@ def repair_record_from_image_crop(
 
 
 def validate_required_fields(record: dict[str, str], image_path: Path) -> None:
-    missing_fields = [field_name for field_name in REQUIRED_FIELDS if not record.get(field_name)]
+    missing_fields = [field_name for field_name in required_fields() if not record.get(field_name)]
     if missing_fields:
         raise ValueError(
             f"Missing required monitoring fields for {image_path.name}: {', '.join(missing_fields)}"
@@ -1320,7 +1354,7 @@ def validate_required_fields(record: dict[str, str], image_path: Path) -> None:
 def validate_field_shapes(record: dict[str, str], image_path: Path) -> None:
     invalid_fields = [
         field_name
-        for field_name in REQUIRED_FIELDS
+        for field_name in required_fields()
         if record.get(field_name) and not is_valid_field_value(field_name, record.get(field_name, ""))
     ]
     if invalid_fields:
@@ -1379,8 +1413,12 @@ def detect_header_row(rows: list[list[OcrItem]]) -> list[OcrItem] | None:
 
 
 def header_anchor_count(header_row: list[OcrItem]) -> int:
-    normalized = " ".join(normalize_header_label(item.text) for item in header_row)
-    return sum(1 for key in HEADER_REQUIRED_KEYS if header_matches(normalized, key))
+    return len(extract_header_anchors(header_row))
+
+
+def missing_required_headers(header_row: list[OcrItem]) -> list[str]:
+    anchors = extract_header_anchors(header_row)
+    return [key for key in required_header_keys() if key not in anchors]
 
 
 def select_ocr_rows(image_path: Path) -> SelectedRows:
@@ -1390,26 +1428,26 @@ def select_ocr_rows(image_path: Path) -> SelectedRows:
     best_header: list[OcrItem] | None = None
     best_ranges = dict(DEFAULT_COLUMN_RANGES)
     best_score = -1
+    best_missing: list[str] = list(required_header_keys())
     for items in variant_items.values():
         rows = group_rows(items)
         header_row = detect_header_row(rows)
-        score = 0
+        score = len(rows)
+        current_missing = list(required_header_keys())
         if header_row is not None:
-            score += 100
-            score += 10 * header_anchor_count(header_row)
-        score += len(rows)
+            anchors = extract_header_anchors(header_row)
+            score += 100 + (10 * len(anchors))
+            current_missing = [key for key in required_header_keys() if key not in anchors]
         if score > best_score:
             best_rows = rows
             best_header = header_row
             best_ranges = derive_column_ranges(header_row)
             best_score = score
+            best_missing = current_missing
     if best_header is None:
-        raise ImageQualityError(f"{image_path.name} does not expose a recognizable monitoring header")
-    anchors = header_anchor_count(best_header)
-    if anchors < 10:
+        missing_labels = ", ".join(header_contract()[key] for key in best_missing)
         raise ImageQualityError(
-            f"{image_path.name} header OCR is too degraded for reliable extraction: "
-            f"{anchors} anchors detected"
+            f"{image_path.name} does not expose the required monitoring headers: {missing_labels}"
         )
     return SelectedRows(best_rows, best_header, best_ranges)
 
