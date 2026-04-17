@@ -6,7 +6,6 @@ required_fields = [
   "percent_change",
   "bid",
   "ask",
-  "volume",
   "quantity",
 ]
 required_header_keys = [

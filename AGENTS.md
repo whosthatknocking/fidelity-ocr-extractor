@@ -57,7 +57,7 @@ Keep those files aligned with the implementation. If you change CSV fields, extr
 ## Extraction Conventions
 
 - Preserve the current CSV schema unless the documentation changes with it.
-- Keep the monitoring extraction contract in `fidelity_extractor.toml` aligned with the implementation and docs.
+- Keep the monitoring extraction contract in `config.toml` aligned with the implementation and docs.
 - Derive `created_at` from the PNG creation time when available, otherwise fall back to modification time.
 - Keep OCR cleanup rules targeted and reversible. Prefer narrow fixes for known Fidelity screenshot artifacts over broad text mutation.
 - If a screenshot does not match the supported monitoring layout, fail clearly or document the limitation rather than pretending it parsed correctly.

@@ -26,12 +26,13 @@ Behavior:
 - if the deterministic output CSV already exists, that PNG is skipped
 - output files are named like `positions_monitoring_<timestamp>.csv`
 - `created_at` is derived from the PNG creation time when available
-- extraction rules for the monitoring schema live in [fidelity_extractor.toml](/Users/emt/Workspace/fidelity-extractor/fidelity_extractor.toml)
+- extraction rules for the monitoring schema live in [config.toml](config.toml)
 - the extractor calibrates column positions from the detected monitoring header so browser-size changes do not require a fixed screenshot resolution
+- OCR runs locally and prefers `tesseract` when it is installed; otherwise the extractor falls back to the existing macOS Vision `swift` path
 - screenshots must pass basic quality gates for size, contrast, and exact monitoring-header OCR before extraction runs
 - all monitoring headers must be present in the screenshot header: `Symbol`, `Last`, `Change`, `% Change`, `Bid`, `Ask`, `Volume`, `Day range`, `52-week range`, `Avg. cost`, `Quantity`, `$ Total G/L`, and `% Total G/L`
 - header detection maps OCR output back to that fixed canonical header set with position-aware matching, so minor OCR slips do not invalidate an otherwise correct screenshot
-- the required CSV fields are configured in `fidelity_extractor.toml`; by default they are `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, `volume`, and `quantity`
+- the required CSV fields are configured in `config.toml`; by default they are `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, and `quantity`
 - `day_range_low`, `day_range_high`, `week_52_low`, `week_52_high`, `avg_cost`, `total_gl`, and `percent_total_gl` may still be blank on individual rows even when their headers are present
 - extraction separates raw OCR collection from normalization and validation, and ambiguous rows fail instead of being exported as low confidence
 - `input/` and generated CSV files are gitignored to reduce accidental commits of private data
@@ -57,6 +58,12 @@ Install runtime dependencies with:
 
 ```bash
 python3 -m pip install -e .
+```
+
+For the local OCR fallback used on the sample screenshots in this repo, install:
+
+```bash
+brew install tesseract
 ```
 
 Install runtime and test dependencies with:

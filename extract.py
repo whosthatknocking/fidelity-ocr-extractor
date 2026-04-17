@@ -7,6 +7,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,9 +33,19 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.9/3.10 fallback
 REPO_ROOT = Path(__file__).resolve().parent
 INPUT_DIR = REPO_ROOT / "input"
 OUTPUT_DIR = REPO_ROOT / "output"
-CONFIG_PATH = REPO_ROOT / "fidelity_extractor.toml"
+CONFIG_PATH = REPO_ROOT / "config.toml"
 SCHEMA_NAME = "monitoring"
 OUTPUT_PREFIX = "positions_monitoring"
+OCR_ENGINE_ENV_VAR = "FIDELITY_OCR_ENGINE"
+OCR_TIMEOUT_SECONDS = 20
+VISION_SWIFT_CMD = [
+    "env",
+    "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer",
+    "CLANG_MODULE_CACHE_PATH=/tmp/clang-module-cache",
+    "xcrun",
+    "swift",
+    "-",
+]
 
 VISION_OCR_SWIFT = r"""
 import AppKit
@@ -154,11 +165,11 @@ HEADER_CLASSIFICATION_VARIANTS = {
     "ask": ("ask", "acl"),
     "volume": ("volume", "voluime", "volurne", "wolumg", "olume"),
     "day_range": ("day range", "dayrange"),
-    "week_52_range": ("52-week range", "52 week range", "52-weekrange"),
-    "avg_cost": ("avg cost", "avg. cost", "avs cos", "avg cos"),
+    "week_52_range": ("52-week range", "52 week range", "52-weekrange", "s2 week range", "52 week"),
+    "avg_cost": ("avg cost", "avg. cost", "avs cos", "avg cos", "aug cost", "aug. cost"),
     "quantity": ("quantity", "quantit"),
-    "total_gl": ("$ total g/l", "$ total gl", "total g/l", "total gl", "sotacl"),
-    "percent_total_gl": ("% total g/l", "% total gl", "cotacl", "caotaci"),
+    "total_gl": ("$ total g/l", "$ total gl", "total g/l", "total gl", "sotacl", "stotal git", "stotal g/l"),
+    "percent_total_gl": ("% total g/l", "% total gl", "cotacl", "caotaci", "total g/l"),
 }
 
 OUTPUT_FIELDS = [
@@ -227,8 +238,15 @@ MIN_IMAGE_WIDTH = 1200
 MIN_IMAGE_HEIGHT = 700
 MIN_IMAGE_STDDEV = 18.0
 MAX_CELL_OCR_CALLS = 24
+MAX_TESSERACT_CELL_OCR_CALLS = 12
 HEADER_OCR_VARIANTS = ["grayscale", "contrast", "sharpen", "binary"]
 CELL_OCR_VARIANTS = ("grayscale", "binary")
+
+
+def cell_ocr_variants() -> tuple[str, ...]:
+    if preferred_ocr_engine() == "tesseract":
+        return ("grayscale",)
+    return CELL_OCR_VARIANTS
 
 
 class ImageQualityError(ValueError):
@@ -236,6 +254,14 @@ class ImageQualityError(ValueError):
 
 
 class OcrBudgetExceededError(RuntimeError):
+    pass
+
+
+class OcrBackendUnavailableError(RuntimeError):
+    pass
+
+
+class OcrExecutionError(RuntimeError):
     pass
 
 
@@ -295,8 +321,16 @@ class RowGeometry:
 
 @dataclass
 class OcrBudget:
-    max_calls: int = MAX_CELL_OCR_CALLS
+    max_calls: int = 0
     calls_used: int = 0
+
+    def __post_init__(self) -> None:
+        if self.max_calls == 0:
+            self.max_calls = (
+                MAX_TESSERACT_CELL_OCR_CALLS
+                if preferred_ocr_engine() == "tesseract"
+                else MAX_CELL_OCR_CALLS
+            )
 
     def consume(self) -> None:
         self.calls_used += 1
@@ -323,14 +357,113 @@ class SelectedRows(NamedTuple):
     column_ranges: dict[str, tuple[float, float]]
 
 
+@lru_cache(maxsize=1)
+def preferred_ocr_engine() -> str:
+    configured = os.environ.get(OCR_ENGINE_ENV_VAR, "auto").strip().lower()
+    if configured in {"vision", "tesseract"}:
+        return configured
+    if shutil.which("tesseract"):
+        return "tesseract"
+    return "vision"
+
+
+def ocr_scratch_dir() -> Path:
+    scratch_dir = OUTPUT_DIR / ".ocr_tmp"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    return scratch_dir
+
+
+def write_temp_ocr_image(image: Image.Image) -> Path:
+    with tempfile.NamedTemporaryFile(
+        suffix=".png",
+        prefix="ocr_",
+        dir=ocr_scratch_dir(),
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+    image.save(temp_path)
+    return temp_path
+
+
+def parse_tesseract_tsv(payload: str, image_size: tuple[int, int]) -> list[OcrItem]:
+    width, height = image_size
+    items: list[OcrItem] = []
+    for row in csv.DictReader(payload.splitlines(), delimiter="\t"):
+        text = clean_text(row.get("text", ""))
+        if not text:
+            continue
+        try:
+            confidence = float(row.get("conf", "-1"))
+            left = int(row["left"])
+            top = int(row["top"])
+            item_width = int(row["width"])
+            item_height = int(row["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if confidence < 0:
+            continue
+        items.append(
+            OcrItem(
+                text=text,
+                x=left / width,
+                y=1.0 - ((top + item_height) / height),
+                width=item_width / width,
+                height=item_height / height,
+            )
+        )
+    return items
+
+
+def run_tesseract_ocr(
+    image_path: Path,
+    *,
+    psm: int = 6,
+    extra_args: list[str] | None = None,
+) -> list[OcrItem]:
+    command = ["tesseract", str(image_path), "stdout", "--psm", str(psm), "-l", "eng", "tsv"]
+    if extra_args:
+        command.extend(extra_args)
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=OCR_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        raise OcrBackendUnavailableError("`tesseract` is not installed.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise OcrExecutionError(f"Tesseract timed out on {image_path.name}") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or str(exc)
+        raise OcrExecutionError(f"Tesseract failed on {image_path.name}: {detail}") from exc
+
+    with Image.open(image_path) as image:
+        image_size = image.size
+    return parse_tesseract_tsv(result.stdout, image_size)
+
+
 def run_vision_ocr(image_path: Path) -> list[OcrItem]:
-    result = subprocess.run(
-        ["swift", "-", str(image_path)],
-        input=VISION_OCR_SWIFT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            [*VISION_SWIFT_CMD, str(image_path)],
+            input=VISION_OCR_SWIFT,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=OCR_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        raise OcrBackendUnavailableError("Swift OCR tooling is unavailable.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise OcrBackendUnavailableError(f"Vision OCR timed out on {image_path.name}") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        raise OcrBackendUnavailableError(
+            f"Vision OCR failed on {image_path.name}: {detail or exc}"
+        ) from exc
+
     payload = json.loads(result.stdout)
     return [OcrItem(**item) for item in payload]
 
@@ -433,6 +566,8 @@ def header_matches(text: str, key: str) -> bool:
 def extract_header_anchors(header_row: list[OcrItem]) -> dict[str, float]:
     anchors: dict[str, float] = {}
     ordered = sorted(header_row, key=lambda entry: entry.x)
+    if not ordered:
+        return anchors
     ordered_keys = sorted(required_header_keys(), key=lambda key: DEFAULT_HEADER_CENTERS[key])
     observed_min = min(item.center_x for item in ordered)
     observed_max = max(item.center_x for item in ordered)
@@ -465,6 +600,24 @@ def extract_header_anchors(header_row: list[OcrItem]) -> dict[str, float]:
         right_item = region_items[-1]
         anchors[key] = (left_item.x + (right_item.x + right_item.width)) / 2
 
+    if len(anchors) < len(ordered_keys):
+        nearest_groups: dict[str, list[OcrItem]] = {key: [] for key in ordered_keys}
+        for item in ordered:
+            nearest_key = min(
+                ordered_keys,
+                key=lambda key: abs(item.center_x - fitted_center(key)),
+            )
+            nearest_groups[nearest_key].append(item)
+        for key, items in nearest_groups.items():
+            if key in anchors or not items:
+                continue
+            label = " ".join(item.text for item in items).strip()
+            if header_match_score(label, key) < 0.68:
+                continue
+            left_item = items[0]
+            right_item = items[-1]
+            anchors[key] = (left_item.x + (right_item.x + right_item.width)) / 2
+
     if len(anchors) < len(ordered_keys) and len(ordered) == len(ordered_keys):
         sequential_anchors: dict[str, float] = {}
         for key, item in zip(ordered_keys, ordered):
@@ -474,6 +627,13 @@ def extract_header_anchors(header_row: list[OcrItem]) -> dict[str, float]:
             sequential_anchors[key] = item.x + (item.width / 2)
         if sequential_anchors:
             anchors = sequential_anchors
+
+    if len(anchors) >= 9 and observed_max - observed_min >= 0.80:
+        for key in ordered_keys:
+            anchors.setdefault(key, fitted_center(key))
+    elif len(anchors) >= 5 and 16 <= len(ordered) <= 18 and observed_max - observed_min >= 0.80:
+        for key in ordered_keys:
+            anchors.setdefault(key, fitted_center(key))
 
     return anchors
 
@@ -494,11 +654,23 @@ def preprocess_for_ocr(image: Image.Image, variant: str) -> Image.Image:
 
 
 def run_vision_ocr_image(image: Image.Image) -> list[OcrItem]:
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
-        temp_path = Path(handle.name)
+    temp_path = write_temp_ocr_image(image)
     try:
-        image.save(temp_path)
         return run_vision_ocr(temp_path)
+    finally:
+        if temp_path.exists():
+            os.unlink(temp_path)
+
+
+def run_tesseract_ocr_image(
+    image: Image.Image,
+    *,
+    psm: int = 6,
+    extra_args: list[str] | None = None,
+) -> list[OcrItem]:
+    temp_path = write_temp_ocr_image(image)
+    try:
+        return run_tesseract_ocr(temp_path, psm=psm, extra_args=extra_args)
     finally:
         if temp_path.exists():
             os.unlink(temp_path)
@@ -510,6 +682,22 @@ def run_vision_ocr_variants(image_path: Path, variants: list[str]) -> dict[str, 
         for variant in variants:
             variant_items[variant] = run_vision_ocr_image(preprocess_for_ocr(image, variant))
     return variant_items
+
+
+def run_tesseract_ocr_variants(image_path: Path, variants: list[str]) -> dict[str, list[OcrItem]]:
+    variant_items: dict[str, list[OcrItem]] = {}
+    with Image.open(image_path) as image:
+        for variant in variants:
+            processed = preprocess_for_ocr(image, variant)
+            variant_items[variant] = run_tesseract_ocr_image(processed, psm=6)
+    return variant_items
+
+
+def run_ocr_variants(image_path: Path, variants: list[str]) -> dict[str, list[OcrItem]]:
+    engine = preferred_ocr_engine()
+    if engine == "tesseract":
+        return run_tesseract_ocr_variants(image_path, variants)
+    return run_vision_ocr_variants(image_path, variants)
 
 
 def validate_image_quality(image_path: Path) -> None:
@@ -909,15 +1097,36 @@ def repair_range_magnitude(value: str, references: list[str]) -> str:
 
 def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
     reconciled = dict(record)
-    if reconciled.get("last"):
+    day_low = normalize_number(reconciled.get("day_range_low"))
+    day_high = normalize_number(reconciled.get("day_range_high"))
+    last = normalize_number(reconciled.get("last"))
+    trustworthy_last = (
+        last is not None
+        and day_low is not None
+        and day_high is not None
+        and day_low <= last <= day_high
+    )
+
+    if trustworthy_last and reconciled.get("last"):
+        for field_name in ("bid", "ask"):
+            if reconciled.get(field_name):
+                reconciled[field_name] = repair_price_from_context(
+                    reconciled[field_name], reconciled["last"]
+                )
+                reconciled[field_name] = repair_price_magnitude(
+                    reconciled[field_name], reconciled["last"]
+                )
+    elif reconciled.get("last"):
         reference_price = reconciled.get("ask") or reconciled.get("bid") or reconciled.get("last", "")
         reconciled["last"] = repair_price_magnitude(reconciled["last"], reference_price)
-    if reconciled.get("last"):
+
+    if reconciled.get("last") and not trustworthy_last:
         for field_name in ("bid", "ask"):
             if reconciled.get(field_name):
                 reconciled[field_name] = repair_price_magnitude(
                     reconciled[field_name], reconciled["last"]
                 )
+
     if reconciled.get("bid") and reconciled.get("ask"):
         reconciled["ask"] = repair_price_from_context(
             reconciled["ask"], reconciled.get("bid", "")
@@ -925,7 +1134,7 @@ def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
         reconciled["bid"] = repair_price_from_context(
             reconciled["bid"], reconciled.get("ask", "")
         )
-    if reconciled.get("last"):
+    if reconciled.get("last") and not trustworthy_last:
         reference_price = reconciled.get("bid") or reconciled.get("ask") or reconciled.get("last", "")
         reconciled["last"] = repair_price_from_context(reconciled["last"], reference_price)
 
@@ -962,10 +1171,21 @@ def reconcile_numeric_fields(record: dict[str, str]) -> dict[str, str]:
 
 def sanitize_optional_fields(record: dict[str, str]) -> dict[str, str]:
     sanitized = dict(record)
+    last = normalize_number(sanitized.get("last"))
+    day_low = normalize_number(sanitized.get("day_range_low"))
+    day_high = normalize_number(sanitized.get("day_range_high"))
+    if (
+        day_low is not None
+        and day_high is not None
+        and (day_low > day_high or (last is not None and not (day_low <= last <= day_high)))
+    ):
+        sanitized["day_range_low"] = ""
+        sanitized["day_range_high"] = ""
+
     price_refs = [
         value
         for value in (
-            normalize_number(sanitized.get("last")),
+            last,
             normalize_number(sanitized.get("bid")),
             normalize_number(sanitized.get("ask")),
             normalize_number(sanitized.get("day_range_low")),
@@ -1274,17 +1494,12 @@ def crop_ocr_items(
     if threshold is not None:
         crop = crop.point(lambda pixel: 255 if pixel > threshold else 0)
     crop = crop.resize((max(1, (crop_right - crop_left) * scale), max(1, (bottom - top) * scale)))
-
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
-        temp_path = Path(handle.name)
-    try:
-        crop.save(temp_path)
-        items = run_vision_ocr(temp_path)
-        cache[cache_key] = items
-        return items
-    finally:
-        if temp_path.exists():
-            os.unlink(temp_path)
+    if preferred_ocr_engine() == "tesseract":
+        items = run_tesseract_ocr_image(crop, psm=7)
+    else:
+        items = run_vision_ocr_image(crop)
+    cache[cache_key] = items
+    return items
 
 
 def collect_cell_texts(
@@ -1300,7 +1515,7 @@ def collect_cell_texts(
     planned_attempts = attempts or [(1.0, 8, None), (1.15, 10, 160)]
     for factor, scale, threshold in planned_attempts:
         expanded_bounds = expand_range(bounds, factor)
-        for variant in CELL_OCR_VARIANTS:
+        for variant in cell_ocr_variants():
             crop_items = crop_ocr_items(
                 image,
                 geometry,
@@ -1456,7 +1671,7 @@ def repair_record_from_image_crop(
     cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]],
 ) -> dict[str, str]:
     left_lines: list[str] = []
-    for variant in CELL_OCR_VARIANTS:
+    for variant in cell_ocr_variants():
         left_items = crop_ocr_items(
             image,
             geometry,
@@ -1470,9 +1685,16 @@ def repair_record_from_image_crop(
 
     field_texts: dict[str, list[str]] = {}
     suspicious_fields = detect_suspicious_fields(record)
+    if preferred_ocr_engine() == "tesseract":
+        suspicious_fields = set()
     retry_fields = []
     for field_name in retry_priority_fields():
         if field_name in column_ranges and field_name not in retry_fields:
+            if preferred_ocr_engine() == "tesseract" and not field_needs_retry(
+                field_name,
+                record.get(field_name, ""),
+            ):
+                continue
             retry_fields.append(field_name)
     for field_name in suspicious_fields:
         if field_name in column_ranges and field_name not in retry_fields:
@@ -1579,6 +1801,17 @@ def detect_suspicious_fields(record: dict[str, str]) -> set[str]:
     return suspicious
 
 
+def record_needs_crop_repair(record: dict[str, str]) -> bool:
+    if not record.get("symbol"):
+        return True
+    if record.get("instrument_type") == "option" and not record.get("expiration"):
+        return True
+    suspicious_fields = detect_suspicious_fields(record)
+    if preferred_ocr_engine() != "tesseract" and suspicious_fields:
+        return True
+    return any(field_needs_retry(field_name, record.get(field_name, "")) for field_name in required_fields())
+
+
 def finalize_record(record: dict[str, str] | None, image_path: Path) -> dict[str, str] | None:
     if record is None:
         return None
@@ -1608,7 +1841,12 @@ def missing_required_headers(header_row: list[OcrItem]) -> list[str]:
 
 def select_ocr_rows(image_path: Path) -> SelectedRows:
     validate_image_quality(image_path)
-    variant_items = run_vision_ocr_variants(image_path, HEADER_OCR_VARIANTS)
+    try:
+        variant_items = run_ocr_variants(image_path, HEADER_OCR_VARIANTS)
+    except OcrBackendUnavailableError as exc:
+        raise ImageQualityError(str(exc)) from exc
+    except OcrExecutionError as exc:
+        raise ImageQualityError(str(exc)) from exc
     best_rows: list[list[OcrItem]] = []
     best_header: list[OcrItem] | None = None
     best_ranges = dict(DEFAULT_COLUMN_RANGES)
@@ -1693,16 +1931,18 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                     "expiration": raw_record.expiration,
                     **normalize_parsed_fields(raw_record.raw_fields),
                 }
-                geometry = build_row_geometry(row, image.size[1], symbol_right_boundary)
-                budget = OcrBudget()
-                current_record = repair_record_from_image_crop(
-                    image=image,
-                    geometry=geometry,
-                    record=current_record,
-                    column_ranges=column_ranges,
-                    budget=budget,
-                    cache=crop_cache,
-                )
+                current_record = reconcile_numeric_fields(current_record)
+                if record_needs_crop_repair(current_record):
+                    geometry = build_row_geometry(row, image.size[1], symbol_right_boundary)
+                    budget = OcrBudget()
+                    current_record = repair_record_from_image_crop(
+                        image=image,
+                        geometry=geometry,
+                        record=current_record,
+                        column_ranges=column_ranges,
+                        budget=budget,
+                        cache=crop_cache,
+                    )
                 pending_symbol_lines = []
                 continue
 

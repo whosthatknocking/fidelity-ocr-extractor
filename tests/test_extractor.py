@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import extract as extractor
 
@@ -27,10 +28,41 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertTrue(extractor.header_matches("Voluime", "volume"))
         self.assertFalse(extractor.header_matches("Random Header", "volume"))
 
+    def test_preferred_ocr_engine_prefers_tesseract_when_available(self) -> None:
+        extractor.preferred_ocr_engine.cache_clear()
+        with mock.patch.dict("os.environ", {}, clear=False):
+            with mock.patch("extract.shutil.which", return_value="/opt/homebrew/bin/tesseract"):
+                self.assertEqual(extractor.preferred_ocr_engine(), "tesseract")
+        extractor.preferred_ocr_engine.cache_clear()
+
+    def test_preferred_ocr_engine_honors_explicit_override(self) -> None:
+        extractor.preferred_ocr_engine.cache_clear()
+        with mock.patch.dict("os.environ", {extractor.OCR_ENGINE_ENV_VAR: "vision"}, clear=False):
+            self.assertEqual(extractor.preferred_ocr_engine(), "vision")
+        extractor.preferred_ocr_engine.cache_clear()
+
+    def test_parse_tesseract_tsv_converts_to_normalized_items(self) -> None:
+        payload = "\n".join(
+            [
+                "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+                "5\t1\t1\t1\t1\t1\t20\t10\t40\t20\t91.5\tUBER",
+                "5\t1\t1\t1\t1\t2\t80\t10\t30\t20\t88.0\t80",
+                "5\t1\t1\t1\t1\t3\t120\t10\t40\t20\t85.0\tCall",
+            ]
+        )
+
+        items = extractor.parse_tesseract_tsv(payload, (200, 100))
+
+        self.assertEqual([item.text for item in items], ["UBER", "80", "Call"])
+        self.assertAlmostEqual(items[0].x, 0.10)
+        self.assertAlmostEqual(items[0].y, 0.70)
+        self.assertAlmostEqual(items[0].width, 0.20)
+        self.assertAlmostEqual(items[0].height, 0.20)
+
     def test_monitoring_contract_loads_required_fields_from_toml(self) -> None:
         self.assertEqual(
             extractor.required_fields(),
-            ["symbol", "last", "change", "percent_change", "bid", "ask", "volume", "quantity"],
+            ["symbol", "last", "change", "percent_change", "bid", "ask", "quantity"],
         )
         self.assertEqual(
             extractor.required_header_keys(),
@@ -134,6 +166,19 @@ class ExtractorHelperTests(unittest.TestCase):
         )
         self.assertGreaterEqual(extractor.normalize_number(reconciled["day_range_low"]), 0.0)
         self.assertLessEqual(extractor.normalize_number(reconciled["day_range_high"]), 1.0)
+        reconciled = extractor.reconcile_numeric_fields(
+            {
+                "last": "$39.85",
+                "bid": "$32.54",
+                "ask": "$49.03",
+                "day_range_low": "38.99",
+                "day_range_high": "39.99",
+            }
+        )
+        self.assertEqual(reconciled["last"], "$39.85")
+        self.assertEqual(reconciled["bid"], "$39.54")
+        self.assertGreaterEqual(extractor.normalize_number(reconciled["ask"]), 39.0)
+        self.assertLessEqual(extractor.normalize_number(reconciled["ask"]), 40.0)
 
     def test_normalize_parsed_fields_uses_regression_fixture(self) -> None:
         fixture = json.loads((FIXTURES_DIR / "noisy_option_row.json").read_text(encoding="utf-8"))
@@ -288,6 +333,17 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(sanitized["total_gl"], "")
         self.assertEqual(sanitized["percent_total_gl"], "")
 
+    def test_sanitize_optional_fields_blanks_inconsistent_day_range(self) -> None:
+        sanitized = extractor.sanitize_optional_fields(
+            {
+                "last": "$21.55",
+                "day_range_low": "27.49",
+                "day_range_high": "29.30",
+            }
+        )
+        self.assertEqual(sanitized["day_range_low"], "")
+        self.assertEqual(sanitized["day_range_high"], "")
+
 
 class ExtractorContractTests(unittest.TestCase):
     def test_parse_main_row_normalizes_sample_like_numeric_noise(self) -> None:
@@ -415,6 +471,32 @@ class ExtractorContractTests(unittest.TestCase):
         for key in ("symbol", "total_gl", "percent_total_gl"):
             self.assertIn(key, anchors)
 
+    def test_extract_header_anchors_backfills_noisy_tesseract_header_positions(self) -> None:
+        header_row = [
+            extractor.OcrItem(text="symbol", x=0.01, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Last", x=0.23, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Change", x=0.29, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="%", x=0.35, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Change", x=0.36, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Bid", x=0.42, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Ask", x=0.48, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Volume", x=0.54, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Dayrange", x=0.60, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="_S2.week", x=0.67, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="range", x=0.71, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Aug.", x=0.75, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="cost", x=0.78, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Quantity", x=0.83, y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="STotal", x=0.90, y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Git", x=0.94, y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Total", x=0.97, y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="G/L", x=0.995, y=0.0, width=0.02, height=0.01),
+        ]
+
+        anchors = extractor.extract_header_anchors(header_row)
+
+        self.assertEqual(set(anchors), set(extractor.required_header_keys()))
+
     def test_is_header_row_rejects_ocr_miss_on_required_headers(self) -> None:
         header_row = [
             extractor.OcrItem(text="Symbol", x=0.04, y=0.0, width=0.04, height=0.01),
@@ -481,7 +563,7 @@ class ExtractorContractTests(unittest.TestCase):
             "week_52_high": "101.99",
         }
 
-        with self.assertRaisesRegex(ValueError, "volume, quantity"):
+        with self.assertRaisesRegex(ValueError, "quantity"):
             extractor.validate_required_fields(record, Path("fixture_input.png"))
 
     def test_validate_required_fields_allows_optional_monitoring_columns_to_be_blank(self) -> None:
