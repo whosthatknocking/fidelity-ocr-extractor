@@ -102,6 +102,7 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(extractor.normalize_money_text("S0K6"), "$0.06")
         self.assertEqual(extractor.normalize_money_text("-$2 281.50"), "-$2281.50")
         self.assertEqual(extractor.normalize_integer_text("3.191 887"), "3,191,887")
+        self.assertEqual(extractor.repair_price_from_context("$70.40", "$170.60"), "$170.40")
         self.assertTrue(extractor.field_needs_retry("bid", "Act"))
         self.assertFalse(extractor.field_needs_retry("bid", "$64.83"))
 
@@ -271,6 +272,20 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(instrument_type, "option")
         self.assertEqual(expiration, "Aug 21 2026")
 
+    def test_select_symbol_lines_prefers_embedded_symbol_over_single_letter_noise(self) -> None:
+        symbol, remaining = extractor.select_symbol_lines(
+            ["M FBTC FIDELITY WISE ORIGIN BITCOIN FUND"]
+        )
+        self.assertEqual(symbol, "FBTC")
+        self.assertEqual(remaining, [])
+
+    def test_select_symbol_lines_extracts_embedded_option_symbol(self) -> None:
+        symbol, remaining = extractor.select_symbol_lines(
+            ["M FBTC 70 Call", "May 15 2026"]
+        )
+        self.assertEqual(symbol, "FBTC 70 Call")
+        self.assertEqual(remaining, ["May 15 2026"])
+
     def test_select_symbol_lines_uses_current_row_equity_symbol(self) -> None:
         symbol, remaining = extractor.select_symbol_lines(
             ["GOOGL", "ALPHABET INC CAP STK CL A"]
@@ -343,6 +358,75 @@ class ExtractorHelperTests(unittest.TestCase):
         )
         self.assertEqual(sanitized["day_range_low"], "")
         self.assertEqual(sanitized["day_range_high"], "")
+
+    def test_repair_shifted_required_fields_from_raw_recovers_tesseract_shift(self) -> None:
+        raw_fields = {
+            "last": ": H —_",
+            "change": "$65.36 aes",
+            "percent_change": "Sweet +$0.65 ope el",
+            "bid": "ere +1.00% ine nd me",
+            "ask": "$65.01 aw",
+            "volume": "$65.25 ou",
+            "day_range_low": "3,188,082 Swewerss",
+        }
+        normalized = {
+            "last": "",
+            "change": "$65.36",
+            "percent_change": "",
+            "bid": "$1.00",
+            "ask": "$65.01",
+            "volume": "65,25",
+        }
+
+        repaired = extractor.repair_shifted_required_fields_from_raw(raw_fields, normalized)
+
+        self.assertEqual(repaired["last"], "$65.36")
+        self.assertEqual(repaired["change"], "+$0.65")
+        self.assertEqual(repaired["percent_change"], "+1.00%")
+        self.assertEqual(repaired["bid"], "$65.01")
+        self.assertEqual(repaired["ask"], "$65.25")
+        self.assertEqual(repaired["volume"], "3,188,082")
+
+    def test_reconcile_numeric_fields_does_not_loop_on_zero_ranges(self) -> None:
+        reconciled = extractor.reconcile_numeric_fields(
+            {
+                "last": "",
+                "bid": "$1.00",
+                "ask": "$65.01",
+                "day_range_low": "3.10",
+                "day_range_high": "0",
+            }
+        )
+        self.assertEqual(reconciled["day_range_high"], "65.01")
+
+    def test_repair_tesseract_price_band_recovers_shifted_first_columns(self) -> None:
+        record = {
+            "last": "",
+            "change": "$05.36",
+            "percent_change": "",
+            "bid": "$1.00",
+            "ask": "$65.01",
+        }
+        items = [
+            extractor.OcrItem(text="$65.36", x=0.20, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+$0.65", x=0.27, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+1.00%", x=0.34, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$65.01", x=0.42, y=0.0, width=0.01, height=0.01),
+        ]
+
+        with mock.patch("extract.row_section_ocr_items", return_value=items):
+            repaired = extractor.repair_tesseract_price_band(
+                image=mock.Mock(),
+                geometry=extractor.RowGeometry(0, 10, 0.2, []),
+                column_ranges=extractor.DEFAULT_COLUMN_RANGES,
+                record=record,
+                section_cache={},
+            )
+
+        self.assertEqual(repaired["last"], "$65.36")
+        self.assertEqual(repaired["change"], "+$0.65")
+        self.assertEqual(repaired["percent_change"], "+1.00%")
+        self.assertEqual(repaired["bid"], "$65.01")
 
 
 class ExtractorContractTests(unittest.TestCase):

@@ -37,7 +37,7 @@ CONFIG_PATH = REPO_ROOT / "config.toml"
 SCHEMA_NAME = "monitoring"
 OUTPUT_PREFIX = "positions_monitoring"
 OCR_ENGINE_ENV_VAR = "FIDELITY_OCR_ENGINE"
-OCR_TIMEOUT_SECONDS = 20
+OCR_TIMEOUT_SECONDS = 8
 VISION_SWIFT_CMD = [
     "env",
     "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer",
@@ -243,6 +243,12 @@ HEADER_OCR_VARIANTS = ["grayscale", "contrast", "sharpen", "binary"]
 CELL_OCR_VARIANTS = ("grayscale", "binary")
 
 
+def header_ocr_variants() -> list[str]:
+    if preferred_ocr_engine() == "tesseract":
+        return ["grayscale", "contrast"]
+    return HEADER_OCR_VARIANTS
+
+
 def cell_ocr_variants() -> tuple[str, ...]:
     if preferred_ocr_engine() == "tesseract":
         return ("grayscale",)
@@ -355,6 +361,9 @@ class SelectedRows(NamedTuple):
     rows: list[list[OcrItem]]
     header_row: list[OcrItem]
     column_ranges: dict[str, tuple[float, float]]
+
+
+SectionCacheKey = tuple[int, int, int, int, int, str, int]
 
 
 @lru_cache(maxsize=1)
@@ -535,6 +544,7 @@ def normalize_header_compact(text: str) -> str:
     return re.sub(r"[^a-z0-9%$]", "", normalize_header_label(text))
 
 
+@lru_cache(maxsize=512)
 def header_match_score(text: str, key: str) -> float:
     normalized = normalize_header_label(text)
     compact = normalize_header_compact(text)
@@ -1022,6 +1032,14 @@ def repair_price_from_context(value: str, context: str) -> str:
         return format_price(numeric_context)
     value_whole, value_frac = value_text.split(".", 1)
     context_whole, _context_frac = context_text.split(".", 1)
+    if len(value_whole) + 1 == len(context_whole):
+        candidate_text = f"{context_whole[0]}{value_whole}.{value_frac}"
+        candidate = float(candidate_text)
+        if (
+            numeric_context * 0.85 <= candidate <= numeric_context * 1.15
+            and abs(candidate - numeric_context) < abs(numeric_value - numeric_context)
+        ):
+            return format_price(candidate)
     if len(value_whole) == len(context_whole):
         candidate_text = f"{context_whole}.{value_frac}"
         candidate = float(candidate_text)
@@ -1044,7 +1062,7 @@ def repair_price_from_context(value: str, context: str) -> str:
 def repair_price_magnitude(value: str, reference: str) -> str:
     numeric_value = normalize_number(value)
     numeric_reference = normalize_number(reference)
-    if numeric_value is None or numeric_reference is None or numeric_reference <= 0:
+    if numeric_value is None or numeric_reference is None or numeric_reference <= 0 or numeric_value <= 0:
         return value
     candidate = numeric_value
     while candidate > numeric_reference * 3.0:
@@ -1081,7 +1099,7 @@ def repair_range_from_references(value: str, references: list[str]) -> str:
 def repair_range_magnitude(value: str, references: list[str]) -> str:
     numeric_value = normalize_number(value)
     numeric_refs = [reference for reference in (normalize_number(item) for item in references) if reference is not None]
-    if numeric_value is None or not numeric_refs:
+    if numeric_value is None or numeric_value <= 0 or not numeric_refs:
         return value
     candidate = numeric_value
     ref_min = min(numeric_refs)
@@ -1309,9 +1327,16 @@ def looks_like_equity_symbol(text: str) -> bool:
 def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
     normalized = [clean_text(line) for line in lines if clean_text(line)]
     option_candidates = [line for line in normalized if looks_like_option_symbol(line)]
+    if not option_candidates:
+        embedded_options: list[str] = []
+        for line in normalized:
+            match = re.search(r"\b([A-Z]{1,5}\s+\d+(?:\.\d+)?\s+(?:Call|Put))\b", line)
+            if match:
+                embedded_options.append(match.group(1))
+        option_candidates = embedded_options
     if option_candidates:
         symbol = normalize_symbol_line(option_candidates[-1])
-        remaining = [line for line in normalized if clean_text(line) != symbol]
+        remaining = [line for line in normalized if symbol not in clean_text(line)]
         return symbol, remaining
 
     equity_candidates = [line for line in normalized if looks_like_equity_symbol(line)]
@@ -1320,13 +1345,29 @@ def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
         remaining = normalized[normalized.index(equity_candidates[0]) + 1 :]
         return symbol, remaining
 
+    token_candidates: list[str] = []
+    for line in normalized:
+        token_candidates.extend(re.findall(r"\b[A-Z]{1,5}\b", normalize_symbol_line(line)))
+    strong_token_candidates = [token for token in token_candidates if len(token) > 1]
+    if strong_token_candidates:
+        symbol = strong_token_candidates[0]
+        remaining = [line for line in normalized if symbol not in line]
+        return symbol, remaining
+    if token_candidates:
+        symbol = token_candidates[0]
+        remaining = [line for line in normalized if symbol not in line]
+        return symbol, remaining
+
     for line in normalized:
         if looks_like_expiration(line):
             continue
         compact = normalize_symbol_line(line)
         tokens = compact.split()
-        if tokens and re.fullmatch(r"[A-Z]{1,5}", tokens[0]):
-            symbol = tokens[0]
+        preferred_token = next((token for token in tokens if re.fullmatch(r"[A-Z]{2,5}", token)), None)
+        if preferred_token is None:
+            preferred_token = next((token for token in tokens if re.fullmatch(r"[A-Z]{1,5}", token)), None)
+        if preferred_token:
+            symbol = preferred_token
             remainder = " ".join(tokens[1:])
             remaining = ([remainder] if remainder else []) + normalized[normalized.index(line) + 1 :]
             return symbol, remaining
@@ -1403,6 +1444,47 @@ def normalize_parsed_fields(parsed: dict[str, str]) -> dict[str, str]:
     return normalized
 
 
+def repair_shifted_required_fields_from_raw(
+    raw_fields: dict[str, str],
+    normalized: dict[str, str],
+) -> dict[str, str]:
+    repaired = dict(normalized)
+    shifted = {
+        "last": normalize_field_value("last", extract_best_field_value("last", [raw_fields.get("change", "")])),
+        "change": normalize_field_value(
+            "change",
+            extract_best_field_value("change", [raw_fields.get("percent_change", "")]),
+        ),
+        "percent_change": normalize_percent_text(
+            extract_best_field_value("percent_change", [raw_fields.get("bid", "")])
+        ),
+        "bid": normalize_field_value("bid", extract_best_field_value("bid", [raw_fields.get("ask", "")])),
+        "ask": normalize_field_value("ask", extract_best_field_value("ask", [raw_fields.get("volume", "")])),
+        "volume": normalize_field_value(
+            "volume",
+            extract_best_field_value("volume", [raw_fields.get("day_range_low", "")]),
+        ),
+    }
+    shifted_last = normalize_number(shifted["last"])
+    shifted_bid = normalize_number(shifted["bid"])
+    shifted_ask = normalize_number(shifted["ask"])
+    if (
+        not repaired.get("last")
+        and shifted_last is not None
+        and shifted_bid is not None
+        and shifted_ask is not None
+        and shifted_bid <= shifted_ask
+        and shifted_bid * 0.85 <= shifted_last <= shifted_ask * 1.15
+        and is_valid_field_value("change", shifted["change"])
+        and is_valid_field_value("percent_change", shifted["percent_change"])
+    ):
+        for field_name in ("last", "change", "percent_change", "bid", "ask"):
+            repaired[field_name] = shifted[field_name]
+        if is_valid_field_value("volume", shifted["volume"]):
+            repaired["volume"] = shifted["volume"]
+    return repaired
+
+
 def parse_main_row(
     row: list[OcrItem],
     column_ranges: dict[str, tuple[float, float]] | None = None,
@@ -1443,7 +1525,9 @@ def read_existing_image_file(csv_path: Path) -> str | None:
 def row_pixel_bounds(row: list[OcrItem], image_height: int) -> tuple[int, int]:
     raw_top = int(min((1 - (item.y + item.height)) * image_height for item in row))
     raw_bottom = int(max((1 - item.y) * image_height for item in row))
-    padding = max(4, int((raw_bottom - raw_top) * 0.35))
+    padding_ratio = 0.12 if preferred_ocr_engine() == "tesseract" else 0.35
+    min_padding = 2 if preferred_ocr_engine() == "tesseract" else 4
+    padding = max(min_padding, int((raw_bottom - raw_top) * padding_ratio))
     top = max(0, raw_top - padding)
     bottom = min(image_height, raw_bottom + padding)
     return top, bottom
@@ -1495,11 +1579,143 @@ def crop_ocr_items(
         crop = crop.point(lambda pixel: 255 if pixel > threshold else 0)
     crop = crop.resize((max(1, (crop_right - crop_left) * scale), max(1, (bottom - top) * scale)))
     if preferred_ocr_engine() == "tesseract":
-        items = run_tesseract_ocr_image(crop, psm=7)
+        try:
+            items = run_tesseract_ocr_image(crop, psm=7)
+        except OcrExecutionError:
+            items = []
     else:
         items = run_vision_ocr_image(crop)
     cache[cache_key] = items
     return items
+
+
+def row_section_ocr_items(
+    image: Image.Image,
+    geometry: RowGeometry,
+    bounds: tuple[float, float],
+    cache: dict[SectionCacheKey, list[OcrItem]],
+    *,
+    scale: int = 4,
+    variant: str = "grayscale",
+    psm: int = 6,
+) -> list[OcrItem]:
+    crop_left, top, crop_right, bottom = cell_pixel_bounds(image.size, geometry, bounds)
+    cache_key: SectionCacheKey = (crop_left, top, crop_right, bottom, scale, variant, psm)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    crop = image.crop((crop_left, top, crop_right, bottom))
+    crop = preprocess_for_ocr(crop, variant)
+    crop = crop.resize((max(1, (crop_right - crop_left) * scale), max(1, (bottom - top) * scale)))
+
+    if preferred_ocr_engine() == "tesseract":
+        try:
+            section_items = run_tesseract_ocr_image(crop, psm=psm)
+        except OcrExecutionError:
+            section_items = []
+    else:
+        section_items = run_vision_ocr_image(crop)
+
+    image_width, image_height = image.size
+    crop_width = max(1, crop_right - crop_left)
+    crop_height = max(1, bottom - top)
+    mapped_items: list[OcrItem] = []
+    for item in section_items:
+        mapped_x = (crop_left + (item.x * crop_width)) / image_width
+        mapped_width = (item.width * crop_width) / image_width
+        mapped_top_px = top + ((1.0 - (item.y + item.height)) * crop_height)
+        mapped_height_px = item.height * crop_height
+        mapped_y = 1.0 - ((mapped_top_px + mapped_height_px) / image_height)
+        mapped_height = mapped_height_px / image_height
+        mapped_items.append(
+            OcrItem(
+                text=item.text,
+                x=mapped_x,
+                y=mapped_y,
+                width=mapped_width,
+                height=mapped_height,
+            )
+        )
+
+    cache[cache_key] = mapped_items
+    return mapped_items
+
+
+def tesseract_row_record(
+    image: Image.Image,
+    geometry: RowGeometry,
+    column_ranges: dict[str, tuple[float, float]],
+    section_cache: dict[SectionCacheKey, list[OcrItem]],
+) -> tuple[list[str], dict[str, str]]:
+    row_items = row_section_ocr_items(
+        image,
+        geometry,
+        (0.0, 1.0),
+        section_cache,
+        scale=3,
+        variant="grayscale",
+        psm=6,
+    )
+    return extract_symbol_lines(row_items, geometry.left_symbol_boundary), parse_main_row_raw(
+        row_items,
+        column_ranges,
+    )
+
+
+def repair_tesseract_price_band(
+    image: Image.Image,
+    geometry: RowGeometry,
+    column_ranges: dict[str, tuple[float, float]],
+    record: dict[str, str],
+    section_cache: dict[SectionCacheKey, list[OcrItem]],
+) -> dict[str, str]:
+    repaired = dict(record)
+    band_items = row_section_ocr_items(
+        image,
+        geometry,
+        (column_ranges["last"][0], column_ranges["volume"][1]),
+        section_cache,
+        scale=4,
+        variant="grayscale",
+        psm=11,
+    )
+    ordered_texts = [item.text for item in sorted(band_items, key=lambda entry: entry.x)]
+    money_candidates: list[str] = []
+    percent_candidates: list[str] = []
+    for text in ordered_texts:
+        cleaned_text = clean_text(text)
+        if "%" not in cleaned_text:
+            money_candidates.extend(re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?", cleaned_text))
+        percent_candidates.extend(re.findall(r"[+-]?\d[\d,]*(?:\.\d+)?%", cleaned_text))
+
+    normalized_money = [
+        normalize_money_text(candidate)
+        for candidate in money_candidates
+        if normalize_money_text(candidate)
+    ]
+    normalized_percent = [
+        normalize_percent_text(candidate)
+        for candidate in percent_candidates
+        if normalize_percent_text(candidate)
+    ]
+
+    suspicious_price_fields = detect_suspicious_fields(repaired).intersection(
+        {"last", "bid", "ask", "change", "percent_change"}
+    )
+    force_band = bool(suspicious_price_fields)
+    missing_last = not repaired.get("last")
+    if (missing_last or force_band) and normalized_money:
+        repaired["last"] = normalized_money[0]
+    if (missing_last or force_band or field_needs_retry("change", repaired.get("change", ""))) and len(normalized_money) >= 2:
+        repaired["change"] = normalized_money[1]
+    if (missing_last or force_band or field_needs_retry("percent_change", repaired.get("percent_change", ""))) and normalized_percent:
+        repaired["percent_change"] = normalized_percent[0]
+    if (missing_last or force_band or field_needs_retry("bid", repaired.get("bid", ""))) and len(normalized_money) >= 3:
+        repaired["bid"] = normalized_money[2]
+    if (missing_last or force_band or field_needs_retry("ask", repaired.get("ask", ""))) and len(normalized_money) >= 4:
+        repaired["ask"] = normalized_money[3]
+
+    return repaired
 
 
 def collect_cell_texts(
@@ -1669,7 +1885,11 @@ def repair_record_from_image_crop(
     column_ranges: dict[str, tuple[float, float]],
     budget: OcrBudget,
     cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]],
+    section_cache: dict[SectionCacheKey, list[OcrItem]],
 ) -> dict[str, str]:
+    if preferred_ocr_engine() == "tesseract":
+        record = repair_tesseract_price_band(image, geometry, column_ranges, record, section_cache)
+
     left_lines: list[str] = []
     for variant in cell_ocr_variants():
         left_items = crop_ocr_items(
@@ -1807,7 +2027,12 @@ def record_needs_crop_repair(record: dict[str, str]) -> bool:
     if record.get("instrument_type") == "option" and not record.get("expiration"):
         return True
     suspicious_fields = detect_suspicious_fields(record)
-    if preferred_ocr_engine() != "tesseract" and suspicious_fields:
+    if preferred_ocr_engine() == "tesseract":
+        if len(record.get("symbol", "")) <= 1 or record.get("instrument_type") == "unknown":
+            return True
+        if suspicious_fields.intersection({"last", "bid", "ask", "change", "percent_change"}):
+            return True
+    elif suspicious_fields:
         return True
     return any(field_needs_retry(field_name, record.get(field_name, "")) for field_name in required_fields())
 
@@ -1842,7 +2067,7 @@ def missing_required_headers(header_row: list[OcrItem]) -> list[str]:
 def select_ocr_rows(image_path: Path) -> SelectedRows:
     validate_image_quality(image_path)
     try:
-        variant_items = run_ocr_variants(image_path, HEADER_OCR_VARIANTS)
+        variant_items = run_ocr_variants(image_path, header_ocr_variants())
     except OcrBackendUnavailableError as exc:
         raise ImageQualityError(str(exc)) from exc
     except OcrExecutionError as exc:
@@ -1897,6 +2122,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
     pending_symbol_lines: list[str] = []
     current_record: dict[str, str] | None = None
     crop_cache: dict[tuple[int, int, int, int, int, int | None, str], list[OcrItem]] = {}
+    section_cache: dict[SectionCacheKey, list[OcrItem]] = {}
 
     with Image.open(image_path) as image:
         for row in rows:
@@ -1908,6 +2134,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                 if current_record is not None:
                     records.append(finalize_record(current_record, image_path))
 
+                raw_fields = parse_main_row_raw(row, column_ranges)
                 candidate_lines = left_lines if select_symbol_lines(left_lines)[0] else pending_symbol_lines + left_lines
                 symbol, instrument_type, description, expiration = parse_symbol_block(candidate_lines)
                 raw_record = RawRecord(
@@ -1918,7 +2145,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                     instrument_type=instrument_type,
                     description=description,
                     expiration=expiration,
-                    raw_fields=parse_main_row_raw(row, column_ranges),
+                    raw_fields=raw_fields,
                     retried_fields=[],
                 )
                 current_record = {
@@ -1931,6 +2158,10 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                     "expiration": raw_record.expiration,
                     **normalize_parsed_fields(raw_record.raw_fields),
                 }
+                current_record = repair_shifted_required_fields_from_raw(
+                    raw_record.raw_fields,
+                    current_record,
+                )
                 current_record = reconcile_numeric_fields(current_record)
                 if record_needs_crop_repair(current_record):
                     geometry = build_row_geometry(row, image.size[1], symbol_right_boundary)
@@ -1942,6 +2173,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                         column_ranges=column_ranges,
                         budget=budget,
                         cache=crop_cache,
+                        section_cache=section_cache,
                     )
                 pending_symbol_lines = []
                 continue
