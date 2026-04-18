@@ -2547,7 +2547,10 @@ def repair_tesseract_price_band(
             and len(normalized_money) >= 2
         ):
             repaired["change"] = normalized_money[1]
-        if (missing_last or force_band or field_needs_retry("percent_change", repaired.get("percent_change", ""))) and normalized_percent:
+        if (
+            (missing_last or force_band or field_needs_retry("percent_change", repaired.get("percent_change", "")))
+            and normalized_percent
+        ):
             repaired["percent_change"] = normalized_percent[0]
         if (missing_last or force_band or field_needs_retry("bid", repaired.get("bid", ""))) and len(normalized_money) >= 3:
             repaired["bid"] = normalized_money[2]
