@@ -24,6 +24,7 @@ Behavior:
 - only PNG files under `input/` are considered
 - every file in `input/` is checked on every run
 - if the deterministic output CSV already exists, that PNG is skipped
+- unsupported or invalid screenshots are reported as per-file failures and do not abort the rest of the batch
 - output files are named like `positions_monitoring_<timestamp>.csv`
 - `created_at` is derived from the PNG creation time when available
 - extraction rules for the monitoring schema live in [config.toml](config.toml)

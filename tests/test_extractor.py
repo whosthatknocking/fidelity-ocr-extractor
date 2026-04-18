@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+import io
+from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 import tempfile
 import unittest
 from unittest import mock
@@ -314,6 +317,17 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(description, "")
         self.assertEqual(expiration, "")
 
+    def test_parse_symbol_block_prefers_inferred_option_strike_over_short_noisy_candidate(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            [
+                "UBER May 01 78 2026 call",
+                "UBER 73 Call",
+            ]
+        )
+        self.assertEqual(symbol, "UBER 78 Call")
+        self.assertEqual(instrument_type, "option")
+        self.assertEqual(description, "")
+
     def test_normalize_symbol_line_ignores_icon_tokens(self) -> None:
         self.assertEqual(
             extractor.normalize_symbol_line("M FBTC E FIDELITY WISE ORIGIN BITCOIN FUND"),
@@ -462,6 +476,67 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(repaired["percent_change"], "+1.00%")
         self.assertEqual(repaired["bid"], "$65.01")
 
+    def test_repair_tesseract_price_band_uses_binary_option_band_when_grayscale_misses(self) -> None:
+        grayscale_items: list[extractor.OcrItem] = []
+        binary_items = [
+            extractor.OcrItem(text="$2.04", x=0.24, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+$0.44", x=0.31, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+27.50%", x=0.37, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$1.89", x=0.44, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$2.04", x=0.49, y=0.0, width=0.01, height=0.01),
+        ]
+
+        with mock.patch("extract.row_section_ocr_items", side_effect=[grayscale_items, binary_items]):
+            repaired = extractor.repair_tesseract_price_band(
+                image=mock.Mock(),
+                geometry=extractor.RowGeometry(0, 10, 0.2, []),
+                column_ranges=extractor.DEFAULT_COLUMN_RANGES,
+                record={
+                    "instrument_type": "option",
+                    "last": "$2.04",
+                    "change": "",
+                    "percent_change": "",
+                    "bid": "",
+                    "ask": "$2.04",
+                },
+                section_cache={},
+            )
+
+        self.assertEqual(repaired["change"], "+$0.44")
+        self.assertEqual(repaired["percent_change"], "+27.50%")
+        self.assertEqual(repaired["bid"], "$1.89")
+
+    def test_detect_header_row_accepts_partial_top_header_row(self) -> None:
+        partial_header = [
+            extractor.OcrItem(text="Symbol", x=0.01, y=0.94, width=0.05, height=0.02),
+            extractor.OcrItem(text="Last", x=0.20, y=0.94, width=0.04, height=0.02),
+            extractor.OcrItem(text="Change", x=0.30, y=0.94, width=0.05, height=0.02),
+            extractor.OcrItem(text="Quantity", x=0.82, y=0.94, width=0.07, height=0.02),
+            extractor.OcrItem(text="Total", x=0.90, y=0.94, width=0.04, height=0.02),
+            extractor.OcrItem(text="G/L", x=0.95, y=0.94, width=0.03, height=0.02),
+        ]
+        data_row = [
+            extractor.OcrItem(text="UBER", x=0.01, y=0.90, width=0.04, height=0.02),
+            extractor.OcrItem(text="$77.28", x=0.20, y=0.90, width=0.05, height=0.02),
+        ]
+
+        def fake_extract_header_anchors(row: list[extractor.OcrItem]) -> dict[str, float]:
+            if row is partial_header:
+                return {
+                    "symbol": 0.03,
+                    "last": 0.22,
+                    "change": 0.32,
+                    "quantity": 0.85,
+                    "total_gl": 0.93,
+                    "percent_total_gl": 0.97,
+                }
+            return {}
+
+        with mock.patch("extract.extract_header_anchors", side_effect=fake_extract_header_anchors):
+            detected = extractor.detect_header_row([partial_header, data_row])
+
+        self.assertIs(detected, partial_header)
+
     def test_tesseract_row_stream_fields_maps_monitoring_columns_in_order(self) -> None:
         items = [
             extractor.OcrItem(text="$337.12", x=0.20, y=0.0, width=0.01, height=0.01),
@@ -512,6 +587,16 @@ class ExtractorHelperTests(unittest.TestCase):
             }
         )
         self.assertEqual(repaired["percent_change"], "+4.61%")
+
+    def test_repair_percent_change_from_price_fields_restores_negative_sign(self) -> None:
+        repaired = extractor.repair_percent_change_from_price_fields(
+            {
+                "last": "$0.18",
+                "change": "-$0.16",
+                "percent_change": "+64.93%",
+            }
+        )
+        self.assertEqual(repaired["percent_change"], "-47.06%")
 
     def test_repair_volume_quantity_swap_moves_large_integer_to_volume(self) -> None:
         repaired = extractor.repair_volume_quantity_swap(
@@ -902,6 +987,36 @@ class ExtractorContractTests(unittest.TestCase):
             finally:
                 extractor.OUTPUT_DIR = original_output_dir
                 extractor.image_created_at = original_image_created_at
+
+    def test_main_continues_after_per_file_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "input"
+            output_dir = temp_path / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            good_png = input_dir / "good.png"
+            bad_png = input_dir / "bad.png"
+            good_png.write_bytes(b"good")
+            bad_png.write_bytes(b"bad")
+
+            def fake_process_image(image_path: Path) -> tuple[str, Path]:
+                if image_path.name == "bad.png":
+                    raise extractor.ImageQualityError("missing monitoring headers")
+                return "extracted", output_dir / "positions_monitoring_fixture.csv"
+
+            stdout_buffer = io.StringIO()
+            stderr_buffer = io.StringIO()
+            with mock.patch("extract.process_image", side_effect=fake_process_image):
+                with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+                    exit_code = extractor.main(
+                        ["--input-dir", str(input_dir), "--output-dir", str(output_dir)]
+                    )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("extracted good.png -> positions_monitoring_fixture.csv", stdout_buffer.getvalue())
+            self.assertIn("processed 2 input file(s): 1 extracted, 0 skipped, 1 failed", stdout_buffer.getvalue())
+            self.assertIn("failed    bad.png -> missing monitoring headers", stderr_buffer.getvalue())
 
 
 if __name__ == "__main__":

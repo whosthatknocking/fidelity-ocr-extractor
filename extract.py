@@ -1492,14 +1492,62 @@ def extract_symbol_candidate_from_lines(lines: list[str]) -> str:
 
 def extract_option_symbol_from_lines(lines: list[str]) -> str:
     consensus_symbol = extract_symbol_candidate_from_lines(lines)
+
+    def inferred_option_symbol(symbol: str) -> str:
+        if not symbol:
+            return ""
+        for line in lines:
+            tokens = re.findall(r"[A-Za-z]+|\d+(?:\.\d+)?", clean_text(line))
+            upper_tokens = [token.upper() for token in tokens]
+            option_type = next(
+                (
+                    "Call" if token.startswith("CA") else "Put"
+                    for token in upper_tokens
+                    if token in {"CALL", "PUT"} or SequenceMatcher(None, token, "CALL").ratio() >= 0.7 or SequenceMatcher(None, token, "PUT").ratio() >= 0.7
+                ),
+                "",
+            )
+            if not option_type:
+                continue
+            numeric_tokens = [
+                token
+                for token in tokens
+                if re.fullmatch(r"\d+(?:\.\d+)?", token)
+                and not (len(token) == 4 and token.startswith("20"))
+            ]
+            strike = ""
+            for token in reversed(numeric_tokens):
+                numeric_value = float(token)
+                if 5 <= numeric_value <= 1000:
+                    strike = token.rstrip("0").rstrip(".") if "." in token else token
+                    break
+            if strike:
+                return f"{symbol} {strike} {option_type}"
+        return ""
+
     direct_candidates: list[str] = []
     for line in lines:
         normalized_line = normalize_symbol_line(line)
         match = OPTION_SYMBOL_RE.search(normalized_line)
         if match:
             direct_candidates.append(match.group(0))
+    inferred_candidate = inferred_option_symbol(consensus_symbol)
     if direct_candidates:
         chosen = normalize_symbol_line(direct_candidates[-1])
+        if inferred_candidate:
+            chosen_parts = chosen.split()
+            inferred_parts = inferred_candidate.split()
+            if (
+                len(chosen_parts) == 3
+                and len(inferred_parts) == 3
+                and chosen_parts[0] == inferred_parts[0]
+                and chosen_parts[2] == inferred_parts[2]
+            ):
+                try:
+                    if abs(float(chosen_parts[1]) - float(inferred_parts[1])) <= 10:
+                        return inferred_candidate
+                except ValueError:
+                    pass
         if consensus_symbol:
             parts = chosen.split()
             if len(parts) == 3 and len(parts[0]) == len(consensus_symbol):
@@ -1512,38 +1560,7 @@ def extract_option_symbol_from_lines(lines: list[str]) -> str:
                 )
         return chosen
 
-    symbol = consensus_symbol
-    if not symbol:
-        return ""
-
-    for line in lines:
-        tokens = re.findall(r"[A-Za-z]+|\d+(?:\.\d+)?", clean_text(line))
-        upper_tokens = [token.upper() for token in tokens]
-        option_type = next(
-            (
-                "Call" if token.startswith("CA") else "Put"
-                for token in upper_tokens
-                if token in {"CALL", "PUT"} or SequenceMatcher(None, token, "CALL").ratio() >= 0.7 or SequenceMatcher(None, token, "PUT").ratio() >= 0.7
-            ),
-            "",
-        )
-        if not option_type:
-            continue
-        numeric_tokens = [
-            token
-            for token in tokens
-            if re.fullmatch(r"\d+(?:\.\d+)?", token)
-            and not (len(token) == 4 and token.startswith("20"))
-        ]
-        strike = ""
-        for token in reversed(numeric_tokens):
-            numeric_value = float(token)
-            if 5 <= numeric_value <= 1000:
-                strike = token.rstrip("0").rstrip(".") if "." in token else token
-                break
-        if strike:
-            return f"{symbol} {strike} {option_type}"
-    return ""
+    return inferred_candidate
 
 
 def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
@@ -2023,7 +2040,8 @@ def repair_percent_change_from_price_fields(record: dict[str, str]) -> dict[str,
     if previous_close <= 0:
         return repaired
     implied = (change / previous_close) * 100.0
-    if percent_change is None or abs(percent_change - implied) > max(1.0, abs(implied) * 3.0):
+    sign_conflict = sign_of(repaired.get("change")) != 0 and sign_of(repaired.get("change")) != sign_of(repaired.get("percent_change"))
+    if sign_conflict or percent_change is None or abs(percent_change - implied) > max(1.0, abs(implied) * 3.0):
         repaired["percent_change"] = f"{implied:+.2f}%"
     return repaired
 
@@ -2132,50 +2150,55 @@ def repair_tesseract_price_band(
     section_cache: dict[SectionCacheKey, list[OcrItem]],
 ) -> dict[str, str]:
     repaired = dict(record)
-    band_items = row_section_ocr_items(
-        image,
-        geometry,
-        (column_ranges["last"][0], column_ranges["volume"][1]),
-        section_cache,
-        scale=4,
-        variant="grayscale",
-        psm=11,
-    )
-    ordered_texts = [item.text for item in sorted(band_items, key=lambda entry: entry.x)]
-    money_candidates: list[str] = []
-    percent_candidates: list[str] = []
-    for text in ordered_texts:
-        cleaned_text = clean_text(text)
-        if "%" not in cleaned_text:
-            money_candidates.extend(re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?", cleaned_text))
-        percent_candidates.extend(re.findall(r"[+-]?\d[\d,]*(?:\.\d+)?%", cleaned_text))
-
-    normalized_money = [
-        normalize_money_text(candidate)
-        for candidate in money_candidates
-        if normalize_money_text(candidate)
-    ]
-    normalized_percent = [
-        normalize_percent_text(candidate)
-        for candidate in percent_candidates
-        if normalize_percent_text(candidate)
-    ]
-
     suspicious_price_fields = detect_suspicious_fields(repaired).intersection(
         {"last", "bid", "ask", "change", "percent_change"}
     )
     force_band = bool(suspicious_price_fields)
     missing_last = not repaired.get("last")
-    if (missing_last or force_band) and normalized_money:
-        repaired["last"] = normalized_money[0]
-    if (missing_last or force_band or field_needs_retry("change", repaired.get("change", ""))) and len(normalized_money) >= 2:
-        repaired["change"] = normalized_money[1]
-    if (missing_last or force_band or field_needs_retry("percent_change", repaired.get("percent_change", ""))) and normalized_percent:
-        repaired["percent_change"] = normalized_percent[0]
-    if (missing_last or force_band or field_needs_retry("bid", repaired.get("bid", ""))) and len(normalized_money) >= 3:
-        repaired["bid"] = normalized_money[2]
-    if (missing_last or force_band or field_needs_retry("ask", repaired.get("ask", ""))) and len(normalized_money) >= 4:
-        repaired["ask"] = normalized_money[3]
+    band_variants = [("grayscale", 4)]
+    if repaired.get("instrument_type") == "option" or field_needs_retry("change", repaired.get("change", "")) or field_needs_retry("bid", repaired.get("bid", "")):
+        band_variants.append(("binary", 6))
+
+    for variant, scale in band_variants:
+        band_items = row_section_ocr_items(
+            image,
+            geometry,
+            (column_ranges["last"][0], column_ranges["volume"][1]),
+            section_cache,
+            scale=scale,
+            variant=variant,
+            psm=11,
+        )
+        ordered_texts = [item.text for item in sorted(band_items, key=lambda entry: entry.x)]
+        money_candidates: list[str] = []
+        percent_candidates: list[str] = []
+        for text in ordered_texts:
+            cleaned_text = clean_text(text)
+            if "%" not in cleaned_text:
+                money_candidates.extend(re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?", cleaned_text))
+            percent_candidates.extend(re.findall(r"[+-]?\d[\d,]*(?:\.\d+)?%", cleaned_text))
+
+        normalized_money = [
+            normalize_money_text(candidate)
+            for candidate in money_candidates
+            if normalize_money_text(candidate)
+        ]
+        normalized_percent = [
+            normalize_percent_text(candidate)
+            for candidate in percent_candidates
+            if normalize_percent_text(candidate)
+        ]
+
+        if (missing_last or force_band or field_needs_retry("last", repaired.get("last", ""))) and normalized_money:
+            repaired["last"] = normalized_money[0]
+        if (missing_last or force_band or field_needs_retry("change", repaired.get("change", ""))) and len(normalized_money) >= 2:
+            repaired["change"] = normalized_money[1]
+        if (missing_last or force_band or field_needs_retry("percent_change", repaired.get("percent_change", ""))) and normalized_percent:
+            repaired["percent_change"] = normalized_percent[0]
+        if (missing_last or force_band or field_needs_retry("bid", repaired.get("bid", ""))) and len(normalized_money) >= 3:
+            repaired["bid"] = normalized_money[2]
+        if (missing_last or force_band or field_needs_retry("ask", repaired.get("ask", ""))) and len(normalized_money) >= 4:
+            repaired["ask"] = normalized_money[3]
 
     return repaired
 
@@ -2511,6 +2534,21 @@ def detect_header_row(rows: list[list[OcrItem]]) -> list[OcrItem] | None:
     for row in rows:
         if is_header_row(row):
             return row
+    best_row: list[OcrItem] | None = None
+    best_score = -1
+    for index, row in enumerate(rows[:3]):
+        anchors = extract_header_anchors(row)
+        row_left = min((item.x for item in row), default=1.0)
+        row_right = max((item.x + item.width for item in row), default=0.0)
+        row_span = row_right - row_left
+        if len(anchors) < 5 or row_span < 0.70:
+            continue
+        score = (10 * len(anchors)) + int(row_span * 100) - (index * 5)
+        if score > best_score:
+            best_row = row
+            best_score = score
+    if best_row is not None:
+        return best_row
     return None
 
 
@@ -2588,7 +2626,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
 
     with Image.open(image_path) as image:
         for row in rows:
-            if is_header_row(row):
+            if row is selected.header_row or is_header_row(row):
                 continue
 
             left_lines = extract_symbol_lines(row, symbol_right_boundary)
@@ -2707,6 +2745,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                         cache=crop_cache,
                         section_cache=section_cache,
                     )
+                current_record = repair_percent_change_from_price_fields(current_record)
                 if current_record.get("instrument_type") == "equity" and current_record.get("symbol"):
                     last_equity_symbol = current_record["symbol"]
                 pending_symbol_lines = []
@@ -2798,9 +2837,15 @@ def main(argv: list[str] | None = None) -> int:
 
     extracted = 0
     skipped = 0
+    failed = 0
     for image_path in images:
         print(f"processing {image_path.name}...", flush=True)
-        status, destination = process_image(image_path)
+        try:
+            status, destination = process_image(image_path)
+        except Exception as exc:
+            failed += 1
+            print(f"failed    {image_path.name} -> {exc}", file=sys.stderr, flush=True)
+            continue
         if status == "extracted":
             extracted += 1
             print(f"extracted {image_path.name} -> {destination.name}", flush=True)
@@ -2809,10 +2854,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skipped   {image_path.name} -> {destination.name}", flush=True)
 
     print(
-        f"processed {len(images)} input file(s): {extracted} extracted, {skipped} skipped",
+        f"processed {len(images)} input file(s): {extracted} extracted, {skipped} skipped, {failed} failed",
         flush=True,
     )
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
