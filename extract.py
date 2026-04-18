@@ -1732,7 +1732,7 @@ def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
     equity_candidates = [line for line in normalized if looks_like_equity_symbol(line)]
     if equity_candidates:
         symbol = normalize_symbol_line(equity_candidates[0])
-        remaining = normalized[normalized.index(equity_candidates[0]) + 1 :]
+        remaining = normalized[normalized.index(equity_candidates[0]) + 1:]
         return symbol, remaining
 
     extracted_symbol = extract_symbol_candidate_from_lines(normalized)
