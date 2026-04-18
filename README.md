@@ -29,6 +29,7 @@ Behavior:
 - `created_at` is derived from the PNG creation time when available
 - extraction rules for the monitoring schema live in [config.toml](config.toml)
 - the extractor calibrates column positions from the detected monitoring header so browser-size changes do not require a fixed screenshot resolution
+- monitoring extraction is schema-driven rather than generic: once the header is anchored, each column is parsed with field-specific rules for symbols, signed money, signed percentages, integers, and ranges
 - OCR runs locally and prefers `tesseract` when it is installed; otherwise the extractor falls back to the existing macOS Vision `swift` path
 - screenshots must pass basic quality gates for size, contrast, and exact monitoring-header OCR before extraction runs
 - all monitoring headers must be present in the screenshot header: `Symbol`, `Last`, `Change`, `% Change`, `Bid`, `Ask`, `Volume`, `Day range`, `52-week range`, `Avg. cost`, `Quantity`, `$ Total G/L`, and `% Total G/L`

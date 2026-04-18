@@ -101,6 +101,20 @@ class ExtractorHelperTests(unittest.TestCase):
             "28.00",
         )
 
+    def test_extract_best_field_value_compacts_spaced_numeric_fragments(self) -> None:
+        self.assertEqual(
+            extractor.extract_best_field_value("total_gl", ["+$2 459.00"]),
+            "+$2459.00",
+        )
+        self.assertEqual(
+            extractor.extract_best_field_value("percent_total_gl", ["+179 94%"]),
+            "+17994%",
+        )
+        self.assertEqual(
+            extractor.extract_best_field_value("week_52_low", ["222 79"]),
+            "222.79",
+        )
+
     def test_money_and_integer_normalizers_repair_ocr_noise(self) -> None:
         self.assertEqual(extractor.normalize_money_text("S0K6"), "$0.06")
         self.assertEqual(extractor.normalize_money_text("-$2 281.50"), "-$2281.50")
@@ -577,6 +591,147 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(parsed["quantity"], "100")
         self.assertEqual(parsed["total_gl"], "+$2459.00")
         self.assertEqual(parsed["percent_total_gl"], "+7.87%")
+
+    def test_tesseract_row_stream_fields_uses_header_derived_schema_ranges(self) -> None:
+        header_row = [
+            extractor.OcrItem(text="Symbol", x=resize_x(0.04), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Last", x=resize_x(0.22), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="Change", x=resize_x(0.29), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="%", x=resize_x(0.35), y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Change", x=resize_x(0.36), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Bid", x=resize_x(0.42), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Ask", x=resize_x(0.48), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="Volume", x=resize_x(0.53), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Day", x=resize_x(0.585), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="range", x=resize_x(0.612), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="52-week", x=resize_x(0.655), y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="range", x=resize_x(0.695), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="Avg Cost", x=resize_x(0.725), y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="Quantity", x=resize_x(0.805), y=0.0, width=0.05, height=0.01),
+            extractor.OcrItem(text="$", x=resize_x(0.86), y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=resize_x(0.875), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="G/L", x=resize_x(0.915), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="%", x=resize_x(0.95), y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="Total", x=resize_x(0.962), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="G/L", x=resize_x(0.995), y=0.0, width=0.03, height=0.01),
+        ]
+        column_ranges = extractor.derive_column_ranges(header_row)
+        items = [
+            extractor.OcrItem(text="$337.12", x=resize_x(0.20), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="+$4.21", x=resize_x(0.27), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="+1.26%", x=resize_x(0.34), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$336.10", x=resize_x(0.42), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$336.40", x=resize_x(0.48), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="24,864,034", x=resize_x(0.55), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="330.90", x=resize_x(0.60), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="337.48", x=resize_x(0.63), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="146.10", x=resize_x(0.67), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="349.00", x=resize_x(0.70), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="$312.53", x=resize_x(0.76), y=0.0, width=0.03, height=0.01),
+            extractor.OcrItem(text="-18", x=resize_x(0.83), y=0.0, width=0.02, height=0.01),
+            extractor.OcrItem(text="+$2 459.00", x=resize_x(0.90), y=0.0, width=0.04, height=0.01),
+            extractor.OcrItem(text="+7.87%", x=resize_x(0.97), y=0.0, width=0.02, height=0.01),
+        ]
+
+        with mock.patch("extract.row_section_ocr_items", return_value=items):
+            parsed = extractor.tesseract_row_stream_fields(
+                image=mock.Mock(),
+                geometry=extractor.RowGeometry(0, 10, column_ranges["last"][0], []),
+                column_ranges=column_ranges,
+                section_cache={},
+            )
+
+        self.assertEqual(parsed["last"], "$337.12")
+        self.assertEqual(parsed["change"], "+$4.21")
+        self.assertEqual(parsed["percent_change"], "+1.26%")
+        self.assertEqual(parsed["bid"], "$336.10")
+        self.assertEqual(parsed["ask"], "$336.40")
+        self.assertEqual(parsed["volume"], "24,864,034")
+        self.assertEqual(parsed["day_range_low"], "330.90")
+        self.assertEqual(parsed["day_range_high"], "337.48")
+        self.assertEqual(parsed["week_52_low"], "146.10")
+        self.assertEqual(parsed["week_52_high"], "349.00")
+        self.assertEqual(parsed["avg_cost"], "$312.53")
+        self.assertEqual(parsed["quantity"], "-18")
+        self.assertEqual(parsed["total_gl"], "+$2459.00")
+        self.assertEqual(parsed["percent_total_gl"], "+7.87%")
+
+    def test_tesseract_row_stream_fields_prefers_sequential_change_when_schema_duplicates_last(self) -> None:
+        items = [
+            extractor.OcrItem(text="$0.78", x=0.20, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="-$0.26", x=0.28, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="-0.25%", x=0.34, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$0.76", x=0.42, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$0.78", x=0.48, y=0.0, width=0.01, height=0.01),
+        ]
+
+        with mock.patch("extract.row_section_ocr_items", return_value=items):
+            with mock.patch(
+                "extract.collect_schema_field_texts",
+                return_value={
+                    "last": ["$0.78"],
+                    "change": ["+$0.78"],
+                    "percent_change": ["-0.25%"],
+                    "bid": ["$0.76"],
+                    "ask": ["$0.76"],
+                    "volume": [],
+                    "day_range_low": [],
+                    "day_range_high": [],
+                    "week_52_low": [],
+                    "week_52_high": [],
+                    "avg_cost": [],
+                    "quantity": [],
+                    "total_gl": [],
+                    "percent_total_gl": [],
+                },
+            ):
+                parsed = extractor.tesseract_row_stream_fields(
+                    image=mock.Mock(),
+                    geometry=extractor.RowGeometry(0, 10, 0.2, []),
+                    column_ranges=extractor.DEFAULT_COLUMN_RANGES,
+                    section_cache={},
+                )
+
+        self.assertEqual(parsed["change"], "-$0.26")
+
+    def test_tesseract_row_stream_fields_prefers_sequential_bid_ask_when_schema_prices_are_implausible(self) -> None:
+        items = [
+            extractor.OcrItem(text="$13.00", x=0.20, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+$1.95", x=0.28, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="+64%", x=0.34, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$12.75", x=0.42, y=0.0, width=0.01, height=0.01),
+            extractor.OcrItem(text="$13.00", x=0.48, y=0.0, width=0.01, height=0.01),
+        ]
+
+        with mock.patch("extract.row_section_ocr_items", return_value=items):
+            with mock.patch(
+                "extract.collect_schema_field_texts",
+                return_value={
+                    "last": [],
+                    "change": [],
+                    "percent_change": [],
+                    "bid": ["+17"],
+                    "ask": ["$12.75"],
+                    "volume": [],
+                    "day_range_low": [],
+                    "day_range_high": [],
+                    "week_52_low": [],
+                    "week_52_high": [],
+                    "avg_cost": [],
+                    "quantity": [],
+                    "total_gl": [],
+                    "percent_total_gl": [],
+                },
+            ):
+                parsed = extractor.tesseract_row_stream_fields(
+                    image=mock.Mock(),
+                    geometry=extractor.RowGeometry(0, 10, 0.2, []),
+                    column_ranges=extractor.DEFAULT_COLUMN_RANGES,
+                    section_cache={},
+                )
+
+        self.assertEqual(parsed["bid"], "$12.75")
+        self.assertEqual(parsed["ask"], "$13.00")
 
     def test_repair_percent_change_from_price_fields_reduces_shifted_percent(self) -> None:
         repaired = extractor.repair_percent_change_from_price_fields(

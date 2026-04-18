@@ -778,6 +778,14 @@ def expand_range(bounds: tuple[float, float], factor: float) -> tuple[float, flo
     return max(0.0, center - half_width), min(1.0, center + half_width)
 
 
+def range_center(bounds: tuple[float, float]) -> float:
+    return (bounds[0] + bounds[1]) / 2
+
+
+def ranges_overlap(left_a: float, right_a: float, left_b: float, right_b: float) -> bool:
+    return max(left_a, left_b) <= min(right_a, right_b)
+
+
 def map_coordinate(x_value: float, anchors: dict[str, float]) -> float:
     points = [(0.0, 0.0)]
     for name, default_center in sorted(DEFAULT_HEADER_CENTERS.items(), key=lambda item: item[1]):
@@ -1930,45 +1938,137 @@ def tesseract_left_lines(
     return deduped
 
 
-def tesseract_row_stream_fields(
-    image: Image.Image,
-    geometry: RowGeometry,
+def split_numeric_item(item: OcrItem) -> list[OcrItem]:
+    text = clean_text(item.text)
+    if not text:
+        return []
+    matches = list(re.finditer(r"[+-]?\$?\d[\d,]*(?:\.\d+)?%?", text))
+    if len(matches) <= 1:
+        return [OcrItem(text=text, x=item.x, y=item.y, width=item.width, height=item.height)] if matches else []
+
+    split_items: list[OcrItem] = []
+    text_length = max(1, len(text))
+    for match in matches:
+        start_ratio = match.start() / text_length
+        end_ratio = match.end() / text_length
+        token_width = max(item.width * (end_ratio - start_ratio), item.width / len(matches))
+        token_x = item.x + (item.width * start_ratio)
+        split_items.append(
+            OcrItem(
+                text=match.group(0),
+                x=token_x,
+                y=item.y,
+                width=token_width,
+                height=item.height,
+            )
+        )
+    return split_items
+
+
+def field_accepts_text(field_name: str, text: str) -> bool:
+    candidate = clean_text(text)
+    if not candidate or not re.search(r"\d", candidate):
+        return False
+    if field_name in PERCENT_FIELDS:
+        return "%" in candidate
+    if field_name in INTEGER_FIELDS:
+        return "$" not in candidate and "%" not in candidate and "." not in candidate
+    if field_name in RANGE_FIELDS:
+        return "$" not in candidate and "%" not in candidate
+    return "%" not in candidate
+
+
+def collect_schema_field_texts(
+    items: list[OcrItem],
+    field_names: list[str],
     column_ranges: dict[str, tuple[float, float]],
-    section_cache: dict[SectionCacheKey, list[OcrItem]],
-) -> dict[str, str]:
-    band_items = row_section_ocr_items(
-        image,
-        geometry,
-        (column_ranges["last"][0], column_ranges["percent_total_gl"][1]),
-        section_cache,
-        scale=4,
-        variant="grayscale",
-        psm=11,
-    )
-    ordered_texts = [clean_text(item.text) for item in sorted(band_items, key=lambda entry: entry.x)]
+) -> dict[str, list[str]]:
+    ordered_fields = sorted(field_names, key=lambda field_name: column_ranges[field_name][0])
+    expanded_ranges = {
+        field_name: expand_range(column_ranges[field_name], 1.08 if field_name in INTEGER_FIELDS else 1.03)
+        for field_name in ordered_fields
+    }
+    field_texts: dict[str, list[str]] = {field_name: [] for field_name in ordered_fields}
+
+    for item in sorted(items, key=lambda entry: entry.x):
+        text = clean_text(item.text)
+        if not text:
+            continue
+        overlapping_fields = [
+            field_name
+            for field_name in ordered_fields
+            if ranges_overlap(
+                item.x,
+                item.x + item.width,
+                expanded_ranges[field_name][0],
+                expanded_ranges[field_name][1],
+            )
+        ]
+        if len(overlapping_fields) == 1:
+            target = overlapping_fields[0]
+            if field_accepts_text(target, text):
+                field_texts[target].append(text)
+            continue
+
+        candidate_fields = overlapping_fields or ordered_fields
+        numeric_parts = split_numeric_item(item)
+        if not numeric_parts:
+            compatible = [field_name for field_name in candidate_fields if field_accepts_text(field_name, text)]
+            if compatible:
+                target = min(
+                    compatible,
+                    key=lambda field_name: abs(item.center_x - range_center(column_ranges[field_name])),
+                )
+                field_texts[target].append(text)
+            continue
+
+        for part in numeric_parts:
+            compatible = [field_name for field_name in candidate_fields if field_accepts_text(field_name, part.text)]
+            if not compatible:
+                compatible = [field_name for field_name in ordered_fields if field_accepts_text(field_name, part.text)]
+            if not compatible:
+                continue
+            target = min(
+                compatible,
+                key=lambda field_name: abs(part.center_x - range_center(column_ranges[field_name])),
+            )
+            field_texts[target].append(part.text)
+            if text != part.text and field_accepts_text(target, text):
+                field_texts[target].append(text)
+
+    return field_texts
+
+
+def sequential_tesseract_stream_fields(items: list[OcrItem]) -> dict[str, str]:
+    ordered_texts = [clean_text(item.text) for item in sorted(items, key=lambda entry: entry.x)]
     stream: list[tuple[str, str]] = []
     for text in ordered_texts:
         if not text:
             continue
-        for token in re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?%?", text):
-            if token.endswith("%"):
-                normalized = normalize_percent_text(token)
+        compact = compact_spaced_numeric_fragments(text)
+        candidates = [compact] if compact and compact != text else []
+        candidates.append(text)
+        for candidate_text in candidates:
+            for token in re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?%?", candidate_text):
+                if token.endswith("%"):
+                    normalized = normalize_percent_text(token)
+                    if normalized:
+                        stream.append(("percent", normalized))
+                    continue
+                if "$" in token or token.startswith(("+$", "-$")):
+                    normalized = normalize_money_text(token)
+                    if normalized:
+                        stream.append(("money", normalized))
+                    continue
+                if "." in token:
+                    normalized = normalize_range_text(token)
+                    if normalized:
+                        stream.append(("range", normalized))
+                    continue
+                normalized = normalize_integer_text(token, signed=token.startswith("-"))
                 if normalized:
-                    stream.append(("percent", normalized))
-                continue
-            if "$" in token or token.startswith(("+$", "-$")):
-                normalized = normalize_money_text(token)
-                if normalized:
-                    stream.append(("money", normalized))
-                continue
-            if "." in token:
-                normalized = normalize_range_text(token)
-                if normalized:
-                    stream.append(("range", normalized))
-                continue
-            normalized = normalize_integer_text(token, signed=token.startswith("-"))
-            if normalized:
-                stream.append(("integer", normalized if not token.startswith("-") else f"-{normalized.lstrip('-')}"))
+                    value = normalized if not token.startswith("-") else f"-{normalized.lstrip('-')}"
+                    stream.append(("integer", value))
 
     def next_value(kind: str) -> str:
         for index, (candidate_kind, value) in enumerate(stream):
@@ -1994,6 +2094,107 @@ def tesseract_row_stream_fields(
         "total_gl": next_value("money"),
         "percent_total_gl": next_value("percent"),
     }
+
+
+def tesseract_row_stream_fields(
+    image: Image.Image,
+    geometry: RowGeometry,
+    column_ranges: dict[str, tuple[float, float]],
+    section_cache: dict[SectionCacheKey, list[OcrItem]],
+) -> dict[str, str]:
+    band_items = row_section_ocr_items(
+        image,
+        geometry,
+        (column_ranges["last"][0], column_ranges["percent_total_gl"][1]),
+        section_cache,
+        scale=4,
+        variant="grayscale",
+        psm=11,
+    )
+    ordered_fields = list(DEFAULT_COLUMN_RANGES.keys())
+    field_texts = collect_schema_field_texts(band_items, ordered_fields, column_ranges)
+    sequential_fields = sequential_tesseract_stream_fields(band_items)
+
+    parsed: dict[str, str] = {}
+    for field_name in ordered_fields:
+        candidate = extract_best_field_value(field_name, field_texts.get(field_name, []))
+        parsed[field_name] = normalize_field_value(
+            field_name,
+            candidate,
+            paired_amount=parsed.get("total_gl", ""),
+        )
+        if not parsed[field_name]:
+            parsed[field_name] = normalize_field_value(
+                field_name,
+                sequential_fields.get(field_name, ""),
+                paired_amount=parsed.get("total_gl", ""),
+            )
+
+    for low_field, high_field in (("day_range_low", "day_range_high"), ("week_52_low", "week_52_high")):
+        sequential_low = normalize_field_value(low_field, sequential_fields.get(low_field, ""))
+        sequential_high = normalize_field_value(high_field, sequential_fields.get(high_field, ""))
+        low_value = parsed.get(low_field, "")
+        high_value = parsed.get(high_field, "")
+        low_number = normalize_number(low_value)
+        high_number = normalize_number(high_value)
+        if sequential_low and not low_value:
+            parsed[low_field] = sequential_low
+            low_value = sequential_low
+            low_number = normalize_number(low_value)
+        if sequential_high and not high_value:
+            parsed[high_field] = sequential_high
+            high_value = sequential_high
+            high_number = normalize_number(high_value)
+        duplicate_pair = low_value and high_value and low_value == high_value and sequential_low != sequential_high
+        inverted_pair = low_number is not None and high_number is not None and high_number <= low_number
+        if sequential_low and sequential_high and (duplicate_pair or inverted_pair):
+            parsed[low_field] = sequential_low
+            parsed[high_field] = sequential_high
+
+    sequential_change = normalize_field_value("change", sequential_fields.get("change", ""))
+    if sequential_change:
+        parsed_change = parsed.get("change", "")
+        parsed_last = parsed.get("last", "")
+        sign_conflict = sign_of(parsed_change) and sign_of(parsed.get("percent_change")) and sign_of(parsed_change) != sign_of(parsed.get("percent_change"))
+        duplicate_last = parsed_change and parsed_last and normalize_number(parsed_change) == normalize_number(parsed_last)
+        if not parsed_change or sign_conflict or duplicate_last:
+            parsed["change"] = sequential_change
+
+    sequential_bid = normalize_field_value("bid", sequential_fields.get("bid", ""))
+    sequential_ask = normalize_field_value("ask", sequential_fields.get("ask", ""))
+    last_number = normalize_number(parsed.get("last"))
+    parsed_bid_number = normalize_number(parsed.get("bid"))
+    parsed_ask_number = normalize_number(parsed.get("ask"))
+    sequential_bid_number = normalize_number(sequential_bid)
+    sequential_ask_number = normalize_number(sequential_ask)
+    if (
+        sequential_bid
+        and sequential_ask
+        and sequential_bid_number is not None
+        and sequential_ask_number is not None
+        and sequential_bid_number <= sequential_ask_number
+    ):
+        impossible_pair = (
+            parsed_bid_number is not None
+            and parsed_ask_number is not None
+            and parsed_bid_number > parsed_ask_number
+        )
+        implausible_bid = (
+            last_number is not None
+            and parsed_bid_number is not None
+            and abs(parsed_bid_number - last_number) > max(5.0, abs(last_number) * 0.5)
+            and abs(sequential_bid_number - last_number) < abs(parsed_bid_number - last_number)
+        )
+        implausible_ask = (
+            last_number is not None
+            and parsed_ask_number is not None
+            and abs(parsed_ask_number - last_number) > max(5.0, abs(last_number) * 0.5)
+            and abs(sequential_ask_number - last_number) < abs(parsed_ask_number - last_number)
+        )
+        if impossible_pair or implausible_bid or implausible_ask:
+            parsed["bid"] = sequential_bid
+            parsed["ask"] = sequential_ask
+    return parsed
 
 
 def adopt_raw_quantity_sign(record: dict[str, str], raw_fields: dict[str, str]) -> dict[str, str]:
@@ -2244,6 +2445,16 @@ def lines_from_crop_items(items: list[OcrItem]) -> list[str]:
     return lines
 
 
+def compact_spaced_numeric_fragments(text: str) -> str:
+    compacted = clean_text(text)
+    if not compacted:
+        return ""
+    compacted = re.sub(r"(?<=\d)\s+(?=\d)", "", compacted)
+    compacted = re.sub(r"(?<=[+-])\s+(?=\$?\d)", "", compacted)
+    compacted = re.sub(r"(?<=\$)\s+(?=\d)", "", compacted)
+    return compacted
+
+
 def extract_best_field_value(field_name: str, texts: list[str]) -> str:
     raw_texts = [text for text in texts if text and str(text).strip()]
     cleaned = [clean_text(text).replace("/", "") for text in raw_texts if clean_text(text)]
@@ -2274,6 +2485,9 @@ def extract_best_field_value(field_name: str, texts: list[str]) -> str:
     if field_name in {"last", "bid", "ask", "avg_cost", "total_gl", "change"}:
         candidates = []
         for text in cleaned:
+            compact = compact_spaced_numeric_fragments(text)
+            if compact:
+                candidates.extend(re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?", compact))
             candidates.extend(re.findall(r"[+-]?\$?\d[\d,]*(?:\.\d+)?", text))
         if not candidates:
             return ""
@@ -2282,10 +2496,29 @@ def extract_best_field_value(field_name: str, texts: list[str]) -> str:
     if field_name in {"percent_change", "percent_total_gl"}:
         candidates = []
         for text in cleaned:
+            compact = compact_spaced_numeric_fragments(text)
+            if compact:
+                candidates.extend(re.findall(r"[+-]?\d[\d,]*(?:\.\d+)?%", compact))
             candidates.extend(re.findall(r"[+-]?\d[\d,]*(?:\.\d+)?%", text))
         if not candidates:
             return ""
         return max(candidates, key=len)
+
+    if field_name in RANGE_FIELDS:
+        candidates = []
+        for text in cleaned:
+            compact = compact_spaced_numeric_fragments(text).replace(",", ".")
+            if compact:
+                candidates.extend(re.findall(r"\d[\d,]*(?:\.\d+)?", compact))
+            groups = re.findall(r"\d+", text)
+            if "." not in text and len(groups) >= 2 and len(groups[-1]) <= 2:
+                whole = "".join(groups[:-1])
+                if whole:
+                    candidates.append(f"{whole}.{groups[-1]}")
+            candidates.extend(re.findall(r"\d[\d,]*(?:\.\d+)?", text))
+        if not candidates:
+            return ""
+        return max(candidates, key=lambda value: ("." in value, len(value)))
 
     candidates = []
     for text in cleaned:
@@ -2614,7 +2847,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
     column_ranges = selected.column_ranges
     created_at = image_created_at(image_path).isoformat(timespec="seconds")
     tesseract_primary = preferred_ocr_engine() == "tesseract"
-    active_column_ranges = dict(DEFAULT_COLUMN_RANGES) if tesseract_primary else column_ranges
+    active_column_ranges = column_ranges
     symbol_right_boundary = min(active_column_ranges["last"][0], 0.30)
 
     records: list[dict[str, str]] = []
