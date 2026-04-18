@@ -1533,7 +1533,7 @@ def extract_equity_symbol_from_lines(lines: list[str]) -> str:
         for index, token in enumerate(word_tokens):
             if token != candidate:
                 continue
-            next_words = word_tokens[index + 1 :]
+            next_words = word_tokens[index + 1:]
             if next_words and len(next_words[0]) > 5:
                 return True
         return False
