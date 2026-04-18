@@ -11,13 +11,10 @@
 
 - `main.py`: top-level subcommand entrypoint
 - `extract.py`: OCR extraction pipeline
-- `viewer.py`: local HTTP viewer
-- `viewer_static/`: browser assets
 
 ## Verification
 
 - `python3 main.py extractor`
-- `python3 main.py viewer`
 
 ## Notes
 

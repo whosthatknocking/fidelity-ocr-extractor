@@ -5,11 +5,10 @@ This file gives project-specific guidance to AI agents working in this repositor
 ## Project Context
 
 - Project: `fidelity-extractor`
-- Purpose: extract the Fidelity Trader+ positions monitoring view from PNG screenshots into CSV files and provide a local viewer for inspection
+- Purpose: extract the Fidelity Trader+ positions monitoring view from PNG screenshots into CSV files
 - Runtime: Python `3.9+` and macOS Vision OCR via `swift`
 - Main entrypoints:
   - `python3 extract.py` for screenshot-to-CSV extraction
-  - `python3 viewer.py` for the local HTTP viewer
 
 ## Source of Truth
 
@@ -22,10 +21,8 @@ When behavior, naming, or scope is unclear, use these files in this order:
 5. `README.md`
 6. `AGENTS.md`
 7. `extract.py`
-8. `viewer.py`
-9. `viewer_static/`
 
-Keep those files aligned with the implementation. If you change CSV fields, extraction rules, file naming, input/output layout, or viewer behavior, update the docs in the same task.
+Keep those files aligned with the implementation. If you change CSV fields, extraction rules, file naming, or input/output layout, update the docs in the same task.
 
 ## Architecture Map
 
@@ -36,13 +33,7 @@ Keep those files aligned with the implementation. If you change CSV fields, extr
   - writes CSV files under `output/`
 - `main.py`
   - top-level subcommand entrypoint
-  - dispatches to the extractor or viewer
-- `viewer.py`
-  - local HTTP server
-  - CSV discovery and serialization
-  - overview payload generation for the browser
-- `viewer_static/`
-  - frontend assets for the local viewer
+  - dispatches to the extractor
 
 ## Non-Negotiable Design Rules
 
@@ -51,7 +42,6 @@ Keep those files aligned with the implementation. If you change CSV fields, extr
 - Write extracted CSV output only to `output/`.
 - Output filenames must start with `positions_monitoring_` and contain only the timestamp suffix.
 - Process every file in `input/` on each run, but skip files whose deterministic output CSV already exists.
-- Keep the viewer as an inspection tool, not a portfolio management or trading engine.
 - Do not silently invent field meanings when OCR is ambiguous. Leave uncertain values as-is or blank rather than mapping misleading values.
 
 ## Extraction Conventions
@@ -62,12 +52,7 @@ Keep those files aligned with the implementation. If you change CSV fields, extr
 - Keep OCR cleanup rules targeted and reversible. Prefer narrow fixes for known Fidelity screenshot artifacts over broad text mutation.
 - If a screenshot does not match the supported monitoring layout, fail clearly or document the limitation rather than pretending it parsed correctly.
 
-## Viewer and Export Conventions
-
 - Keep exported CSVs under `output/`.
-- Viewer payloads must remain JSON-serializable.
-- Keep the viewer visual language and interaction model aligned with the `opx` viewer lineage: file picker, tabbed layout, sortable/filterable dataset table, pagination, and row-detail modal.
-- If exported columns change, update the viewer assumptions in the same task.
 
 ## Error Handling and Stability
 
@@ -81,11 +66,10 @@ Run the smallest relevant verification first, then broaden if needed.
 
 - Main checks:
   - `python3 extract.py`
-  - `python3 viewer.py`
 
 Testing guidance:
 
-- Add or update focused verification whenever extraction mapping, output shape, or viewer payload behavior changes.
+- Add or update focused verification whenever extraction mapping or output shape changes.
 - Prefer offline, deterministic checks by default.
 - If OCR quality limits a value, say so explicitly and note what still needs manual review.
 
@@ -96,15 +80,14 @@ Update `README.md` when any of these change:
 - CSV field names or meanings
 - input/output directory rules
 - extraction naming rules
-- viewer usage
 - supported Fidelity views
 
 Keep the `docs/` files aligned with implementation when changing contracts or user-facing behavior.
 
 ## Practical Workflow
 
-1. Read the extractor and viewer code first.
-2. Make the smallest coherent change that keeps extraction, CSV shape, and viewer behavior aligned.
+1. Read the extractor code first.
+2. Make the smallest coherent change that keeps extraction and CSV shape aligned.
 3. Update docs with user-facing behavior changes.
 4. Run targeted verification and state what was actually checked.
 
@@ -112,13 +95,11 @@ Keep the `docs/` files aligned with implementation when changing contracts or us
 
 - tightening OCR-to-column mapping for the monitoring schema
 - improving deterministic skip behavior for already extracted PNGs
-- fixing viewer payload or table interaction edge cases
-- updating docs so they match the actual extractor and viewer behavior
+- updating docs so they match the actual extractor behavior
 
 ## Bad Changes
 
 - reading screenshots from outside `input/`
 - writing ad hoc files outside `output/`
 - adding undocumented CSV columns casually
-- changing viewer or output behavior without updating docs
 - claiming support for non-monitoring Fidelity views without implementation

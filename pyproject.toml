@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fidelity-extractor"
 version = "0.1.0"
-description = "Extract Fidelity Trader+ monitoring screenshots into CSV files and browse them locally."
+description = "Extract Fidelity Trader+ monitoring screenshots into CSV files."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
@@ -24,10 +24,9 @@ dev = [
 
 [project.scripts]
 fidelity-extractor = "main:main"
-fidelity-extractor-viewer = "viewer:main"
 
 [tool.setuptools]
-py-modules = ["extract", "viewer", "main"]
+py-modules = ["extract", "main"]
 
 [tool.setuptools.package-data]
-"*" = ["viewer_static/*", "docs/*"]
+"*" = ["docs/*"]

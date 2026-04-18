@@ -29,7 +29,6 @@ Fidelity does not provide a simple export path or public API for this Trader+ mo
 - `input/`: source PNG files to process
 - `output/`: extracted CSV files
 - `docs/`: project contract and usage notes
-- `viewer_static/`: local viewer assets
 
 ## Extract CSVs
 
@@ -63,21 +62,6 @@ Behavior:
 - extraction separates raw OCR collection from normalization and validation, and ambiguous rows fail instead of being exported as low confidence
 - `input/` and generated CSV files are gitignored to reduce accidental commits of private data
 
-## View CSVs
-
-```bash
-python3 main.py viewer
-python3 main.py viewer --open
-```
-
-The viewer serves the CSV files in `output/` and provides:
-
-- file picker for extracted snapshots
-- sortable, filterable dataset table
-- pagination
-- row detail modal
-- reference tab backed by the field reference document
-
 ## Packaging
 
 Install runtime dependencies with:
@@ -102,8 +86,6 @@ Console scripts:
 
 ```bash
 fidelity-extractor extractor
-fidelity-extractor viewer
-fidelity-extractor viewer --open
 ```
 
 ## Current Scope

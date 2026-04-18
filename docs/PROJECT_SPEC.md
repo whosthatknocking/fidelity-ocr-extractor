@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`fidelity-extractor` is an archived prototype that explored converting Fidelity Trader+ positions screenshots from the fixed `monitoring` layout into CSV files and serving a local inspection viewer.
+`fidelity-extractor` is an archived prototype that explored converting Fidelity Trader+ positions screenshots from the fixed `monitoring` layout into CSV files.
 
 This spec remains useful as a record of the schema and validation assumptions, but the repository should not be treated as a production-ready extraction system.
 
@@ -11,7 +11,6 @@ This spec remains useful as a record of the schema and validation assumptions, b
 - Input format: PNG screenshots in `input/`
 - Supported Fidelity view: positions `monitoring`
 - Output format: CSV files in `output/`
-- Viewer scope: local browsing and inspection of generated CSV files
 - OCR backend: local macOS Vision or local `tesseract` fallback
 - Project status: experimental reference, not a production extraction path
 

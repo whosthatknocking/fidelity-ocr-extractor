@@ -42,23 +42,6 @@ Runtime plus test tooling:
 python3 -m pip install -e ".[dev]"
 ```
 
-## Browse extracted CSVs
-
-Run:
-
-```bash
-python3 main.py viewer
-python3 main.py viewer --open
-```
-
-The viewer opens a local HTTP UI for:
-
-- selecting an extracted CSV snapshot
-- sorting and filtering the dataset table
-- paging through rows
-- opening row details
-- reading the field reference for the current CSV schema
-
 ## Install as a package
 
 ```bash
@@ -69,6 +52,4 @@ Then use:
 
 ```bash
 fidelity-extractor extractor
-fidelity-extractor viewer
-fidelity-extractor viewer --open
 ```
