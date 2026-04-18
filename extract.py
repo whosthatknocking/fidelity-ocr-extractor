@@ -1645,7 +1645,11 @@ def extract_option_symbol_from_lines(lines: list[str]) -> str:
                 (
                     "Call" if token.startswith("CA") else "Put"
                     for token in upper_tokens
-                    if token in {"CALL", "PUT"} or SequenceMatcher(None, token, "CALL").ratio() >= 0.7 or SequenceMatcher(None, token, "PUT").ratio() >= 0.7
+                    if (
+                        token in {"CALL", "PUT"}
+                        or SequenceMatcher(None, token, "CALL").ratio() >= 0.7
+                        or SequenceMatcher(None, token, "PUT").ratio() >= 0.7
+                    )
                 ),
                 "",
             )
