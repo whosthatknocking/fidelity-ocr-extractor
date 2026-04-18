@@ -20,6 +20,18 @@ Extract Fidelity Trader+ positions from monitoring view screenshots and export t
 - Dark theme compatibility
 - Batch processing of PNG screenshots
 
+## Design Approach
+
+This tool uses a multi-stage OCR pipeline to extract structured data from Fidelity Trader+ monitoring screenshots:
+
+**OCR Engine**: Leverages macOS Vision framework (primary) with Tesseract OCR as fallback for text recognition from PNG images.
+
+**Column Detection**: Automatically calibrates column positions by analyzing the header row, allowing flexible screenshot widths without fixed dimensions.
+
+**Data Processing**: Applies schema-specific parsing, text normalization, and validation rules defined in `config.toml` to transform raw OCR output into clean CSV data.
+
+**Quality Gates**: Implements image quality checks and cross-field validation to reject low-confidence extractions rather than producing unreliable data.
+
 ## Installation
 
 ### Requirements
