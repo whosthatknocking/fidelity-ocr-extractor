@@ -281,6 +281,17 @@ def cell_ocr_variants() -> tuple[str, ...]:
     return CELL_OCR_VARIANTS
 
 
+def left_text_ocr_variants() -> tuple[tuple[str, int, int], ...]:
+    if preferred_ocr_engine() == "tesseract":
+        return (
+            ("grayscale", 6, 6),
+            ("invert_grayscale", 6, 6),
+            ("binary", 8, 11),
+            ("invert_binary", 8, 11),
+        )
+    return (("grayscale", 6, 6), ("binary", 8, 11))
+
+
 class ImageQualityError(ValueError):
     pass
 
@@ -691,6 +702,8 @@ def preprocess_for_ocr(image: Image.Image, variant: str) -> Image.Image:
     processed = image.convert("L")
     if variant == "grayscale":
         return processed
+    if variant == "invert_grayscale":
+        return ImageOps.invert(processed)
     if variant == "contrast":
         return ImageOps.autocontrast(processed, cutoff=1)
     if variant == "sharpen":
@@ -699,6 +712,10 @@ def preprocess_for_ocr(image: Image.Image, variant: str) -> Image.Image:
     if variant == "binary":
         contrasted = ImageOps.autocontrast(processed, cutoff=1)
         return contrasted.point(lambda pixel: 255 if pixel > 170 else 0)
+    if variant == "invert_binary":
+        contrasted = ImageOps.autocontrast(processed, cutoff=1)
+        binary = contrasted.point(lambda pixel: 255 if pixel > 170 else 0)
+        return ImageOps.invert(binary)
     raise ValueError(f"Unknown OCR preprocess variant: {variant}")
 
 
@@ -2033,7 +2050,7 @@ def tesseract_left_lines(
     section_cache: dict[SectionCacheKey, list[OcrItem]],
 ) -> list[str]:
     candidate_lines: list[str] = []
-    for variant, scale, psm in (("grayscale", 6, 6), ("binary", 8, 11)):
+    for variant, scale, psm in left_text_ocr_variants():
         items = row_section_ocr_items(
             image,
             geometry,
@@ -2734,14 +2751,19 @@ def repair_record_from_image_crop(
         record = repair_tesseract_price_band(image, geometry, column_ranges, record, section_cache)
 
     left_lines: list[str] = []
-    for variant in cell_ocr_variants():
+    left_variants = (
+        tuple((variant, 10) for variant, _scale, _psm in left_text_ocr_variants())
+        if preferred_ocr_engine() == "tesseract"
+        else tuple((variant, 10) for variant in cell_ocr_variants())
+    )
+    for variant, scale in left_variants:
         left_items = crop_ocr_items(
             image,
             geometry,
             (0.0, geometry.left_symbol_boundary),
             budget,
             cache,
-            scale=10,
+            scale=scale,
             variant=variant,
         )
         left_lines.extend(lines_from_crop_items(left_items))

@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import extract as extractor
+from PIL import Image
 
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
@@ -43,6 +44,29 @@ class ExtractorHelperTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {extractor.OCR_ENGINE_ENV_VAR: "vision"}, clear=False):
             self.assertEqual(extractor.preferred_ocr_engine(), "vision")
         extractor.preferred_ocr_engine.cache_clear()
+
+    def test_left_text_ocr_variants_include_inverted_tesseract_variants(self) -> None:
+        extractor.preferred_ocr_engine.cache_clear()
+        with mock.patch.dict("os.environ", {extractor.OCR_ENGINE_ENV_VAR: "tesseract"}, clear=False):
+            self.assertEqual(
+                extractor.left_text_ocr_variants(),
+                (
+                    ("grayscale", 6, 6),
+                    ("invert_grayscale", 6, 6),
+                    ("binary", 8, 11),
+                    ("invert_binary", 8, 11),
+                ),
+            )
+        extractor.preferred_ocr_engine.cache_clear()
+
+    def test_preprocess_for_ocr_supports_inverted_variants(self) -> None:
+        image = Image.new("L", (1, 1), color=32)
+
+        inverted = extractor.preprocess_for_ocr(image, "invert_grayscale")
+        inverted_binary = extractor.preprocess_for_ocr(image, "invert_binary")
+
+        self.assertEqual(inverted.getpixel((0, 0)), 223)
+        self.assertEqual(inverted_binary.getpixel((0, 0)), 255)
 
     def test_parse_tesseract_tsv_converts_to_normalized_items(self) -> None:
         payload = "\n".join(
