@@ -1510,7 +1510,7 @@ def score_symbol_candidate(tokens: list[str], index: int) -> int:
     if index <= 4:
         score += 2
     trailing_words = 0
-    for candidate in tokens[index + 1 : index + 6]:
+    for candidate in tokens[index + 1: index + 6]:
         if candidate.isdigit():
             score += 4
             continue
