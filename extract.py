@@ -1529,7 +1529,11 @@ def extract_equity_symbol_from_lines(lines: list[str]) -> str:
         return token not in SYMBOL_STOPWORDS and not month_from_token(token)
 
     def candidate_precedes_description(line: str, candidate: str) -> bool:
-        word_tokens = [token for token in re.findall(r"[A-Za-z]+", normalize_symbol_line(line).upper()) if is_equity_token(token)]
+        word_tokens = [
+            token
+            for token in re.findall(r"[A-Za-z]+", normalize_symbol_line(line).upper())
+            if is_equity_token(token)
+        ]
         for index, token in enumerate(word_tokens):
             if token != candidate:
                 continue
