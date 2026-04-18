@@ -2503,7 +2503,11 @@ def repair_tesseract_price_band(
     force_band = bool(suspicious_price_fields)
     missing_last = not repaired.get("last")
     band_variants = [("grayscale", 4)]
-    if repaired.get("instrument_type") == "option" or field_needs_retry("change", repaired.get("change", "")) or field_needs_retry("bid", repaired.get("bid", "")):
+    if (
+        repaired.get("instrument_type") == "option"
+        or field_needs_retry("change", repaired.get("change", ""))
+        or field_needs_retry("bid", repaired.get("bid", ""))
+    ):
         band_variants.append(("binary", 6))
 
     for variant, scale in band_variants:
