@@ -1048,6 +1048,7 @@ class ExtractorContractTests(unittest.TestCase):
             extractor.OcrItem(text="G/L", x=resize_x(0.995), y=0.0, width=0.03, height=0.01),
         ]
         column_ranges = extractor.derive_column_ranges(header_row)
+
         def cell_x(field_name: str, width: float = 0.02) -> float:
             left, right = column_ranges[field_name]
             return ((left + right) / 2) - (width / 2)
