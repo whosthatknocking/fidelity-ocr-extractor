@@ -35,6 +35,7 @@ Behavior:
 - all monitoring headers must be present in the screenshot header: `Symbol`, `Last`, `Change`, `% Change`, `Bid`, `Ask`, `Volume`, `Day range`, `52-week range`, `Avg. cost`, `Quantity`, `$ Total G/L`, and `% Total G/L`
 - header detection maps OCR output back to that fixed canonical header set with position-aware matching, so minor OCR slips do not invalidate an otherwise correct screenshot
 - symbol extraction is intentionally strict: equity rows export `TICKER`, option rows export `TICKER <strike> Call|Put`, and option expirations are normalized from the adjacent date text
+- option expirations must resolve to canonical `Mon DD YYYY` text; raw OCR lines that merely contain a month token are rejected rather than exported
 - icon badges such as the purple `M` or green `E` are treated as noise and ignored during symbol parsing
 - the required CSV fields are configured in `config.toml`; by default they are `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, and `quantity`
 - `description` is optional and may be blank when left-side OCR is noisy; `day_range_low`, `day_range_high`, `week_52_low`, `week_52_high`, `avg_cost`, `total_gl`, and `percent_total_gl` may still be blank on individual rows even when their headers are present

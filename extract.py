@@ -211,6 +211,7 @@ DESCRIPTION_FIXES = {
 
 MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 MONTH_PREFIX_MAP = {name.lower(): name for name in MONTH_NAMES}
+EXPIRATION_RE = re.compile(rf"^(?:{'|'.join(MONTH_NAMES)}) (?:[1-9]|[12]\d|3[01]) 20\d{{2}}$")
 SYMBOL_STOPWORDS = {
     *(name.upper() for name in MONTH_NAMES),
     "CALL",
@@ -223,6 +224,7 @@ SYMBOL_STOPWORDS = {
     "CAP",
     "STK",
     "CL",
+    "CLA",
     "ETF",
     "FUND",
     "AND",
@@ -1384,6 +1386,10 @@ def looks_like_expiration(text: str) -> bool:
     )
 
 
+def is_valid_expiration(text: str) -> bool:
+    return bool(EXPIRATION_RE.fullmatch(clean_text(text)))
+
+
 def looks_like_option_symbol(text: str) -> bool:
     normalized = normalize_symbol_line(text)
     return bool(OPTION_SYMBOL_RE.fullmatch(normalized))
@@ -1392,6 +1398,28 @@ def looks_like_option_symbol(text: str) -> bool:
 def looks_like_equity_symbol(text: str) -> bool:
     normalized = normalize_symbol_line(text)
     return bool(EQUITY_SYMBOL_RE.fullmatch(normalized))
+
+
+def is_valid_symbol_text(text: str) -> bool:
+    normalized = normalize_symbol_line(text)
+    return bool(EQUITY_SYMBOL_RE.fullmatch(normalized) or OPTION_SYMBOL_RE.fullmatch(normalized))
+
+
+def symbol_quality_score(symbol: str, instrument_type: str = "", expiration: str = "") -> int:
+    normalized = normalize_symbol_line(symbol)
+    if OPTION_SYMBOL_RE.fullmatch(normalized):
+        score = 40 + len(normalized)
+        if instrument_type == "option":
+            score += 5
+        if is_valid_expiration(expiration):
+            score += 5
+        return score
+    if EQUITY_SYMBOL_RE.fullmatch(normalized):
+        score = 20 + len(normalized)
+        if instrument_type == "equity":
+            score += 3
+        return score
+    return 0
 
 
 def month_from_token(token: str) -> str:
@@ -1477,6 +1505,91 @@ def score_symbol_candidate(tokens: list[str], index: int) -> int:
     if any(candidate in {"CALL", "PUT"} for candidate in tokens[index + 1 : index + 8]):
         score += 5
     return score
+
+
+def extract_equity_symbol_from_lines(lines: list[str]) -> str:
+    def is_equity_token(token: str) -> bool:
+        return token not in SYMBOL_STOPWORDS and not month_from_token(token)
+
+    def candidate_precedes_description(line: str, candidate: str) -> bool:
+        word_tokens = [token for token in re.findall(r"[A-Za-z]+", normalize_symbol_line(line).upper()) if is_equity_token(token)]
+        for index, token in enumerate(word_tokens):
+            if token != candidate:
+                continue
+            next_words = word_tokens[index + 1 :]
+            if next_words and len(next_words[0]) > 5:
+                return True
+        return False
+
+    def line_primary_candidate(line: str) -> str:
+        normalized_line = normalize_symbol_line(line)
+        if not normalized_line:
+            return ""
+        upper_line = normalized_line.upper()
+
+        exact_tokens = [token for token in re.findall(r"\b[A-Z]{1,5}\b", upper_line) if is_equity_token(token)]
+        if not exact_tokens:
+            return ""
+        if len(exact_tokens) == 1 and upper_line == exact_tokens[0]:
+            return exact_tokens[0]
+
+        repeated_candidates = [token for token in exact_tokens if exact_tokens.count(token) > 1]
+        if repeated_candidates:
+            return max(repeated_candidates, key=lambda token: (len(token), -exact_tokens.index(token)))
+
+        word_tokens = re.findall(r"[A-Za-z]+", upper_line)
+        filtered_words = [token for token in word_tokens if is_equity_token(token)]
+        for index, token in enumerate(filtered_words):
+            if not re.fullmatch(r"[A-Z]{1,5}", token):
+                continue
+            next_words = filtered_words[index + 1 :]
+            if next_words and len(next_words[0]) > 5:
+                if len(token) >= 3:
+                    return token
+                later_strong = next(
+                    (
+                        candidate
+                        for candidate in filtered_words[index + 1 :]
+                        if re.fullmatch(r"[A-Z]{3,5}", candidate) and is_equity_token(candidate)
+                    ),
+                    "",
+                )
+                if later_strong:
+                    return later_strong
+
+        strong_tokens = [token for token in exact_tokens if len(token) >= 3]
+        if strong_tokens:
+            return max(strong_tokens, key=lambda token: (exact_tokens.count(token), -exact_tokens.index(token), len(token)))
+        return max(exact_tokens, key=lambda token: (exact_tokens.count(token), -exact_tokens.index(token), len(token)))
+
+    candidate_counts: dict[str, int] = {}
+    candidate_scores: dict[str, int] = {}
+
+    for line in lines:
+        primary = line_primary_candidate(line)
+        if not primary:
+            continue
+        candidate_counts[primary] = candidate_counts.get(primary, 0) + 1
+        candidate_scores[primary] = max(candidate_scores.get(primary, -100), 20 + len(primary))
+
+        normalized_line = normalize_symbol_line(line).upper()
+        if candidate_precedes_description(line, primary):
+            candidate_scores[primary] += 12
+        if len(re.findall(rf"\b{re.escape(primary)}\b", normalized_line)) > 1:
+            candidate_scores[primary] += 14
+        if normalized_line == primary:
+            candidate_scores[primary] += 10
+        elif re.fullmatch(rf"[^A-Z]*{re.escape(primary)}[^A-Z]*", normalized_line):
+            candidate_scores[primary] += 10
+        elif re.match(rf"^[^A-Z]*{re.escape(primary)}(?:[^A-Z]|$)", normalized_line):
+            candidate_scores[primary] += 6
+        elif normalized_line.startswith(f"{primary} "):
+            candidate_scores[primary] += 6
+
+    if not candidate_scores:
+        return ""
+
+    return max(candidate_scores, key=lambda token: (candidate_counts.get(token, 0), candidate_scores[token], len(token)))
 
 
 def extract_symbol_candidate_from_lines(lines: list[str]) -> str:
@@ -1594,6 +1707,11 @@ def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
         remaining = [line for line in normalized if symbol not in clean_text(line)]
         return symbol, remaining
 
+    extracted_equity_symbol = extract_equity_symbol_from_lines(normalized)
+    if extracted_equity_symbol:
+        remaining = [line for line in normalized if extracted_equity_symbol not in normalize_symbol_line(line)]
+        return extracted_equity_symbol, remaining
+
     equity_candidates = [line for line in normalized if looks_like_equity_symbol(line)]
     if equity_candidates:
         symbol = normalize_symbol_line(equity_candidates[0])
@@ -1642,10 +1760,6 @@ def parse_symbol_block(lines: list[str]) -> tuple[str, str, str, str]:
     symbol_line, remaining_lines = select_symbol_lines(cleaned)
     if symbol_line and (" Call" in symbol_line or " Put" in symbol_line):
         expiration = extract_expiration_from_lines(cleaned)
-        if not expiration:
-            for candidate in cleaned:
-                if looks_like_expiration(candidate):
-                    expiration = clean_text(candidate)
         return symbol_line, "option", "", expiration
 
     first = normalize_symbol_line(symbol_line or cleaned[0])
@@ -2539,13 +2653,27 @@ def repair_record_from_crop_texts(
     forced = force_fields or set()
 
     symbol, instrument_type, _description, expiration = parse_symbol_block(left_lines)
-    if symbol:
+    accepted_symbol = False
+    existing_symbol_score = symbol_quality_score(
+        repaired.get("symbol", ""),
+        repaired.get("instrument_type", ""),
+        repaired.get("expiration", ""),
+    )
+    replacement_symbol_score = symbol_quality_score(symbol, instrument_type, expiration)
+    if symbol and replacement_symbol_score > existing_symbol_score:
         repaired["symbol"] = symbol
-    if instrument_type:
+        accepted_symbol = True
+    if instrument_type in {"equity", "option"} and (accepted_symbol or not repaired.get("instrument_type")):
         repaired["instrument_type"] = instrument_type
+    elif repaired.get("symbol", "").endswith((" Call", " Put")):
+        repaired["instrument_type"] = "option"
+    elif repaired.get("symbol") and EQUITY_SYMBOL_RE.fullmatch(repaired.get("symbol", "")):
+        repaired["instrument_type"] = "equity"
     repaired["description"] = ""
-    if expiration or repaired["instrument_type"] == "option":
+    if expiration and (accepted_symbol or not repaired.get("expiration")):
         repaired["expiration"] = expiration
+    elif repaired.get("instrument_type") != "option":
+        repaired["expiration"] = ""
 
     if repaired.get("quantity"):
         normalized_quantity = normalize_field_value("quantity", repaired["quantity"])
@@ -2670,11 +2798,24 @@ def validate_required_fields(record: dict[str, str], image_path: Path) -> None:
 
 
 def validate_field_shapes(record: dict[str, str], image_path: Path) -> None:
+    invalid_fields: list[str] = []
+    instrument_type = record.get("instrument_type", "")
+    if instrument_type not in {"equity", "option"}:
+        invalid_fields.append("instrument_type")
     invalid_fields = [
-        field_name
-        for field_name in required_fields()
-        if record.get(field_name) and not is_valid_field_value(field_name, record.get(field_name, ""))
+        *invalid_fields,
+        *[
+            field_name
+            for field_name in required_fields()
+            if record.get(field_name) and not is_valid_field_value(field_name, record.get(field_name, ""))
+        ],
     ]
+    expiration = record.get("expiration", "")
+    if instrument_type == "option":
+        if not is_valid_expiration(expiration):
+            invalid_fields.append("expiration")
+    elif expiration:
+        invalid_fields.append("expiration")
     if invalid_fields:
         raise ValueError(
             f"Invalid extracted field shapes for {image_path.name}: {', '.join(invalid_fields)}"
@@ -2739,11 +2880,14 @@ def detect_suspicious_fields(record: dict[str, str]) -> set[str]:
 def record_needs_crop_repair(record: dict[str, str]) -> bool:
     if not record.get("symbol"):
         return True
-    if record.get("instrument_type") == "option" and not record.get("expiration"):
+    instrument_type = record.get("instrument_type", "")
+    if instrument_type not in {"equity", "option"}:
+        return True
+    if instrument_type == "option" and not record.get("expiration"):
         return True
     suspicious_fields = detect_suspicious_fields(record)
     if preferred_ocr_engine() == "tesseract":
-        if len(record.get("symbol", "")) <= 1 or record.get("instrument_type") == "unknown":
+        if len(record.get("symbol", "")) <= 1:
             return True
         if suspicious_fields.intersection({"last", "bid", "ask", "change", "percent_change"}):
             return True
@@ -2960,7 +3104,7 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                 current_record = reconcile_numeric_fields(current_record)
                 needs_fallback = (
                     not current_record.get("symbol")
-                    or current_record.get("instrument_type") == "unknown"
+                    or current_record.get("instrument_type") not in {"equity", "option"}
                     or (
                         current_record.get("instrument_type") == "option"
                         and not current_record.get("expiration")

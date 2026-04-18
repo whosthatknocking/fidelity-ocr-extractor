@@ -6,7 +6,7 @@
 - `symbol`: extracted ticker symbol in one of these forms: `TICKER` or `TICKER <strike> Call|Put`.
 - `instrument_type`: `equity` or `option`.
 - `description`: optional free-text field. The extractor may leave it blank to avoid exporting noisy OCR.
-- `expiration`: option expiration string in `Mon DD YYYY` form for option rows only. Equity rows leave this blank.
+- `expiration`: option expiration string in `Mon DD YYYY` form for option rows only. Equity rows leave this blank. Malformed OCR text is invalid and must not be exported as `expiration`.
 - `last`: last traded price as a dollar amount.
 - `change`: absolute change value as a signed dollar amount.
 - `percent_change`: percent move column as a signed percentage.

@@ -270,6 +270,72 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(repaired["week_52_high"], "28.00")
         self.assertIn("change", repaired["_retried_fields"])
 
+    def test_repair_record_from_crop_texts_does_not_downgrade_instrument_type_to_unknown(self) -> None:
+        repaired = extractor.repair_record_from_crop_texts(
+            record={
+                "schema_name": "monitoring",
+                "image_file": "fixture_input.png",
+                "created_at": "2030-01-02T03:04:05-08:00",
+                "symbol": "UBER 78 Call",
+                "instrument_type": "option",
+                "description": "",
+                "expiration": "May 1 2026",
+                "last": "$2.04",
+                "change": "+$0.44",
+                "percent_change": "+27.50%",
+                "bid": "$1.89",
+                "ask": "$2.04",
+                "volume": "204",
+                "day_range_low": "",
+                "day_range_high": "",
+                "week_52_low": "",
+                "week_52_high": "",
+                "avg_cost": "",
+                "quantity": "-1",
+                "total_gl": "",
+                "percent_total_gl": "",
+            },
+            left_lines=["—", "…"],
+            field_texts={},
+        )
+
+        self.assertEqual(repaired["symbol"], "UBER 78 Call")
+        self.assertEqual(repaired["instrument_type"], "option")
+        self.assertEqual(repaired["expiration"], "May 1 2026")
+
+    def test_repair_record_from_crop_texts_preserves_valid_symbol_against_bad_retry_symbol(self) -> None:
+        repaired = extractor.repair_record_from_crop_texts(
+            record={
+                "schema_name": "monitoring",
+                "image_file": "fixture_input.png",
+                "created_at": "2030-01-02T03:04:05-08:00",
+                "symbol": "UBER 78 Call",
+                "instrument_type": "option",
+                "description": "",
+                "expiration": "May 1 2026",
+                "last": "$2.04",
+                "change": "+$0.44",
+                "percent_change": "+27.50%",
+                "bid": "$1.89",
+                "ask": "$2.04",
+                "volume": "204",
+                "day_range_low": "",
+                "day_range_high": "",
+                "week_52_low": "",
+                "week_52_high": "",
+                "avg_cost": "",
+                "quantity": "-1",
+                "total_gl": "",
+                "percent_total_gl": "",
+            },
+            left_lines=["AE"],
+            field_texts={},
+        )
+
+        self.assertEqual(repaired["symbol"], "UBER 78 Call")
+        self.assertEqual(repaired["instrument_type"], "option")
+        self.assertEqual(repaired["expiration"], "May 1 2026")
+
     def test_parse_symbol_block_ignores_stale_expiration_prefix(self) -> None:
         symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
             ["May 15 2026", "FDIG", "FIDELITY CRYPTO INDUSTRY AND DIGITAL PAYMENTS ETF"]
@@ -322,11 +388,59 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(description, "")
         self.assertEqual(expiration, "May 15 2026")
 
+    def test_parse_symbol_block_does_not_emit_raw_expiration_garbage(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            [
+                "G) — PAL GOOGL Apr TRPADL 17 20264 325 I TINA. Put VPA OE LL",
+                "GOOGL 325 Put",
+            ]
+        )
+        self.assertEqual(symbol, "GOOGL 325 Put")
+        self.assertEqual(instrument_type, "option")
+        self.assertEqual(description, "")
+        self.assertEqual(expiration, "")
+
     def test_parse_symbol_block_prefers_multi_letter_symbol_over_leading_noise(self) -> None:
         symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
             ["M om UBER UBER TECHNOLOGIES INC COM", "6 UIBER"]
         )
         self.assertEqual(symbol, "UBER")
+        self.assertEqual(instrument_type, "equity")
+        self.assertEqual(description, "")
+        self.assertEqual(expiration, "")
+
+    def test_parse_symbol_block_prefers_repeated_equity_ticker_over_noise_prefix(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["QO MSFT MICROSOFT CORP", "MSFT"]
+        )
+        self.assertEqual(symbol, "MSFT")
+        self.assertEqual(instrument_type, "equity")
+        self.assertEqual(description, "")
+        self.assertEqual(expiration, "")
+
+    def test_parse_symbol_block_prefers_ticker_before_company_name_over_noisy_standalone_line(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["NVDA NVIDIA CORPORATION COM", "NYDA"]
+        )
+        self.assertEqual(symbol, "NVDA")
+        self.assertEqual(instrument_type, "equity")
+        self.assertEqual(description, "")
+        self.assertEqual(expiration, "")
+
+    def test_parse_symbol_block_prefers_actual_ticker_over_company_name_token(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["TSLA TESLA INC COM"]
+        )
+        self.assertEqual(symbol, "TSLA")
+        self.assertEqual(instrument_type, "equity")
+        self.assertEqual(description, "")
+        self.assertEqual(expiration, "")
+
+    def test_parse_symbol_block_ignores_description_suffix_token_for_equity(self) -> None:
+        symbol, instrument_type, description, expiration = extractor.parse_symbol_block(
+            ["PALANTIR TECHNOLOGIES INC CLA", "PLTR"]
+        )
+        self.assertEqual(symbol, "PLTR")
         self.assertEqual(instrument_type, "equity")
         self.assertEqual(description, "")
         self.assertEqual(expiration, "")
@@ -1088,6 +1202,40 @@ class ExtractorContractTests(unittest.TestCase):
         }
 
         extractor.validate_required_fields(record, Path("fixture_input.png"))
+
+    def test_validate_field_shapes_rejects_malformed_option_expiration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "expiration"):
+            extractor.validate_field_shapes(
+                {
+                    "symbol": "GOOGL 325 Put",
+                    "instrument_type": "option",
+                    "expiration": "G) — PAL GOOGL Apr TRPADL 17 20264 325 I TINA. Put VPA OE LL",
+                    "last": "$1.23",
+                    "change": "+$0.10",
+                    "percent_change": "+8.85%",
+                    "bid": "$1.22",
+                    "ask": "$1.24",
+                    "quantity": "-1",
+                },
+                Path("fixture_input.png"),
+            )
+
+    def test_validate_field_shapes_rejects_invalid_instrument_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "instrument_type"):
+            extractor.validate_field_shapes(
+                {
+                    "symbol": "GOOGL",
+                    "instrument_type": "unknown",
+                    "expiration": "",
+                    "last": "$174.10",
+                    "change": "+$1.25",
+                    "percent_change": "+0.72%",
+                    "bid": "$174.00",
+                    "ask": "$174.15",
+                    "quantity": "10",
+                },
+                Path("fixture_input.png"),
+            )
 
     def test_validate_cross_field_consistency_rejects_last_outside_day_range(self) -> None:
         with self.assertRaisesRegex(ValueError, "Last is outside day range"):
