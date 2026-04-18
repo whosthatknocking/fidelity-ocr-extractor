@@ -12,10 +12,32 @@ license = {file = "LICENSE"}
 authors = [
     {name = "whosthatknocking"},
 ]
+maintainers = [
+    {name = "whosthatknocking"},
+]
+keywords = ["ocr", "fidelity", "trading", "finance", "csv", "extraction"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 dependencies = [
     "Pillow>=10.0.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/whosthatknocking/fidelity-ocr-extractor"
+Repository = "https://github.com/whosthatknocking/fidelity-ocr-extractor"
+Issues = "https://github.com/whosthatknocking/fidelity-ocr-extractor/issues"
+Changelog = "https://github.com/whosthatknocking/fidelity-ocr-extractor/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
