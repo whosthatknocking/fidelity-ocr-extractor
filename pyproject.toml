@@ -31,3 +31,7 @@ py-modules = ["extract", "main"]
 
 [tool.setuptools.package-data]
 "*" = ["docs/*"]
+
+[tool.flake8]
+max-line-length = 127
+max-complexity = 10
