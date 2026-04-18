@@ -1559,7 +1559,7 @@ def extract_equity_symbol_from_lines(lines: list[str]) -> str:
         for index, token in enumerate(filtered_words):
             if not re.fullmatch(r"[A-Z]{1,5}", token):
                 continue
-            next_words = filtered_words[index + 1 :]
+            next_words = filtered_words[index + 1:]
             if next_words and len(next_words[0]) > 5:
                 if len(token) >= 3:
                     return token
