@@ -1,10 +1,28 @@
 # Fidelity Extractor
 
-This project extracts Fidelity Trader+ positions from the fixed `monitoring` screenshot view and writes them as CSV files.
+This repository is an archived experiment that attempted to extract Fidelity Trader+ positions from the fixed `monitoring` screenshot view and write them as CSV files.
+
+## Status
+
+This code is kept for reference only.
+
+The main conclusion from the experiment is that screenshot OCR is not the right foundation for a production-grade solution for this use case. Even with schema-specific parsing, targeted crop OCR, validation, and dark-theme handling, the extractor still cannot run reliably enough across the sample screenshots to meet a production accuracy bar.
+
+If this work continues, the recommended direction is to stop using screenshots as the primary data source and instead use one of:
+
+- direct export or clipboard data from Fidelity, if available
+- browser DOM extraction from the live table
+- accessibility-tree extraction from the rendered UI
+
+This repository may still be useful as a record of:
+
+- the `monitoring` schema assumptions
+- OCR failure modes seen on dark-theme Fidelity screenshots
+- validation rules that remain useful even if the extraction source changes
 
 ## Objective
 
-Fidelity does not provide a simple export path or public API for this Trader+ monitoring view. This script exists to close that gap: turn the on-screen positions table into a structured CSV so the data can be reviewed, archived, and worked with outside the Fidelity UI.
+Fidelity does not provide a simple export path or public API for this Trader+ monitoring view. This prototype explored whether the on-screen positions table could be converted from screenshots into structured CSV data for review and archival outside the Fidelity UI.
 
 ## Layout
 
@@ -18,6 +36,8 @@ Fidelity does not provide a simple export path or public API for this Trader+ mo
 ```bash
 python3 main.py extractor
 ```
+
+The extractor is preserved here for experimentation and reference. It is not presented as a reliable production workflow.
 
 Behavior:
 
@@ -88,4 +108,4 @@ fidelity-extractor viewer --open
 
 ## Current Scope
 
-Only the Fidelity Trader+ positions `monitoring` view is supported right now. Screenshots that cannot be extracted reliably are rejected instead of being emitted with low-confidence data.
+Only the Fidelity Trader+ positions `monitoring` view was explored in this prototype. Screenshots that cannot be extracted reliably are rejected instead of being emitted with low-confidence data.

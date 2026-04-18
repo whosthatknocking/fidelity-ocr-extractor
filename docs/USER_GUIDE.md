@@ -1,5 +1,7 @@
 # User Guide
 
+This guide describes the archived OCR prototype in this repository. It is retained for reference and experimentation, not as a recommended production workflow.
+
 ## Extract screenshots
 
 1. Put Fidelity Trader+ monitoring screenshots into `input/`.
@@ -10,6 +12,12 @@ python3 main.py extractor
 ```
 
 The extractor creates CSV files in `output/`. If a matching output file already exists for a PNG, that PNG is skipped.
+
+Important:
+
+- This OCR path is experimental and not considered reliable enough for production use.
+- Rows that fail image-quality or schema-validation checks may be rejected instead of exported.
+- The long-term recommendation is to replace screenshot OCR with extraction from the live UI or another semantic data source.
 
 Notes:
 

@@ -2,7 +2,9 @@
 
 ## Purpose
 
-`fidelity-extractor` converts Fidelity Trader+ positions screenshots from the fixed `monitoring` layout into CSV files and serves a local inspection viewer.
+`fidelity-extractor` is an archived prototype that explored converting Fidelity Trader+ positions screenshots from the fixed `monitoring` layout into CSV files and serving a local inspection viewer.
+
+This spec remains useful as a record of the schema and validation assumptions, but the repository should not be treated as a production-ready extraction system.
 
 ## Supported Scope
 
@@ -11,6 +13,7 @@
 - Output format: CSV files in `output/`
 - Viewer scope: local browsing and inspection of generated CSV files
 - OCR backend: local macOS Vision or local `tesseract` fallback
+- Project status: experimental reference, not a production extraction path
 
 ## Explicit Non-Scope
 
@@ -37,3 +40,7 @@
 - Required monitoring fields are defined by `monitoring.required_fields` in `config.toml`; the current required set is `symbol`, `last`, `change`, `percent_change`, `bid`, `ask`, and `quantity`.
 - All monitoring header labels are required and are defined by `monitoring.required_header_keys` plus `monitoring.headers` in `config.toml`.
 - `description`, `day_range_low`, `day_range_high`, `week_52_low`, `week_52_high`, `avg_cost`, `total_gl`, and `percent_total_gl` remain part of the CSV schema but may be blank on individual rows even though their headers are always required.
+
+## Outcome Note
+
+The experiment showed that screenshot OCR, even with schema-specific repair and validation, is not stable enough to be considered a product-grade solution for this workflow. Future work should prefer semantic extraction from the live UI or an upstream export source over continued OCR tuning.
