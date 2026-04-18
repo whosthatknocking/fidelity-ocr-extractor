@@ -1,53 +1,111 @@
 # Fidelity OCR Extractor
 
-This repository is an archived experiment that attempted to extract Fidelity Trader+ positions from the fixed `monitoring` screenshot view and write them as CSV files.
+[![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Lint](https://github.com/whosthatknocking/fidelity-ocr-extractor/actions/workflows/lint.yml/badge.svg)](https://github.com/whosthatknocking/fidelity-ocr-extractor/actions/workflows/lint.yml)
 
-## Status
+Extract Fidelity Trader+ positions from monitoring view screenshots and export them as CSV files.
 
-This code is kept for reference only.
+## ⚠️ Status
 
-The main conclusion from the experiment is that screenshot OCR is not the right foundation for a production-grade solution for this use case. Even with schema-specific parsing, targeted crop OCR, validation, and dark-theme handling, the extractor still cannot run reliably enough across the sample screenshots to meet a production accuracy bar.
+**This is an experimental prototype.** Screenshot OCR is not recommended for production use due to reliability limitations. Consider using direct data exports, browser DOM extraction, or accessibility APIs instead.
 
-If this work continues, the recommended direction is to stop using screenshots as the primary data source and instead use one of:
+## Features
 
-- direct export or clipboard data from Fidelity, if available
-- browser DOM extraction from the live table
-- accessibility-tree extraction from the rendered UI
+- Extract positions data from Fidelity Trader+ monitoring screenshots
+- Automatic column detection and calibration
+- CSV export with structured data
+- Support for equity and options positions
+- Dark theme compatibility
+- Batch processing of PNG screenshots
 
-This repository may still be useful as a record of:
+## Installation
 
-- the `monitoring` schema assumptions
-- OCR failure modes seen on dark-theme Fidelity screenshots
-- validation rules that remain useful even if the extraction source changes
+### Requirements
 
-## Objective
+- Python 3.9+
+- macOS (for Vision OCR framework)
 
-Fidelity does not provide a simple export path or public API for this Trader+ monitoring view. This prototype explored whether the on-screen positions table could be converted from screenshots into structured CSV data for review and archival outside the Fidelity UI.
+### Install from source
 
-## Layout
+```bash
+git clone https://github.com/whosthatknocking/fidelity-ocr-extractor.git
+cd fidelity-ocr-extractor
+pip install -e .[dev]
+```
 
-- `input/`: source PNG files to process
-- `output/`: extracted CSV files
-- `docs/`: project contract and usage notes
+## Usage
 
-## Extract CSVs
+### Basic Usage
+
+Place PNG screenshots in the `input/` directory and run:
 
 ```bash
 python3 main.py extractor
 ```
 
-The extractor is preserved here for experimentation and reference. It is not presented as a reliable production workflow.
+Or use the installed script:
 
-Behavior:
+```bash
+fidelity-ocr-extractor
+```
 
-- only PNG files under `input/` are considered
-- every file in `input/` is checked on every run
-- if the deterministic output CSV already exists, that PNG is skipped
-- unsupported or invalid screenshots are reported as per-file failures and do not abort the rest of the batch
-- output files are named like `positions_monitoring_<timestamp>.csv`
-- `created_at` is derived from the PNG creation time when available
-- extraction rules for the monitoring schema live in [config.toml](config.toml)
-- the extractor calibrates column positions from the detected monitoring header so browser-size changes do not require a fixed screenshot resolution
+### Output
+
+- Processed screenshots are skipped if their CSV output already exists
+- Output files are named `positions_monitoring_<timestamp>.csv`
+- CSV contains structured position data with fields like symbol, price, change, etc.
+
+### Directory Structure
+
+```
+fidelity-ocr-extractor/
+├── input/          # Place PNG screenshots here
+├── output/         # Generated CSV files appear here
+├── docs/           # Documentation and specifications
+├── tests/          # Test suite
+└── config.toml     # Extraction configuration
+```
+
+## Development
+
+### Setup
+
+```bash
+pip install -e .[dev]
+```
+
+### Testing
+
+```bash
+pytest
+```
+
+### Linting
+
+```bash
+flake8
+```
+
+### Project Structure
+
+- `extract.py` - Core OCR and data extraction logic
+- `main.py` - CLI entry point
+- `config.toml` - Schema definitions and extraction rules
+- `docs/` - Detailed documentation
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Ensure linting passes
+6. Submit a pull request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 - monitoring extraction is schema-driven rather than generic: once the header is anchored, each column is parsed with field-specific rules for symbols, signed money, signed percentages, integers, and ranges
 - OCR runs locally and prefers `tesseract` when it is installed; otherwise the extractor falls back to the existing macOS Vision `swift` path
 - for dark-theme screenshots, left-side symbol and expiration OCR also tries inverted black-on-white variants instead of relying on one fixed color treatment
