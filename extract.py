@@ -1764,7 +1764,7 @@ def select_symbol_lines(lines: list[str]) -> tuple[str, list[str]]:
         if preferred_token:
             symbol = preferred_token
             remainder = " ".join(tokens[1:])
-            remaining = ([remainder] if remainder else []) + normalized[normalized.index(line) + 1 :]
+            remaining = ([remainder] if remainder else []) + normalized[normalized.index(line) + 1:]
             return symbol, remaining
     return "", normalized
 
