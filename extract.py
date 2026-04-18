@@ -3156,7 +3156,10 @@ def build_records(image_path: Path) -> list[dict[str, str]]:
                         current_record.get("instrument_type") == "option"
                         and not current_record.get("expiration")
                     )
-                    or any(field_needs_retry(field_name, current_record.get(field_name, "")) for field_name in required_fields())
+                    or any(
+                        field_needs_retry(field_name, current_record.get(field_name, ""))
+                        for field_name in required_fields()
+                    )
                 )
                 if needs_fallback or (not tesseract_primary and record_needs_crop_repair(current_record)):
                     budget = OcrBudget()
