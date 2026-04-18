@@ -1566,7 +1566,7 @@ def extract_equity_symbol_from_lines(lines: list[str]) -> str:
                 later_strong = next(
                     (
                         candidate
-                        for candidate in filtered_words[index + 1 :]
+                        for candidate in filtered_words[index + 1:]
                         if re.fullmatch(r"[A-Z]{3,5}", candidate) and is_equity_token(candidate)
                     ),
                     "",
