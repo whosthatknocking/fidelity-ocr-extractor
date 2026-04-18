@@ -1479,7 +1479,7 @@ def extract_expiration_from_lines(lines: list[str]) -> str:
             month = month_from_token(token)
             if not month:
                 continue
-            trailing_digits = [normalized_digit_token(candidate) for candidate in tokens[index + 1 : index + 8]]
+            trailing_digits = [normalized_digit_token(candidate) for candidate in tokens[index + 1: index + 8]]
             pre_year_digits: list[str] = []
             for digits in trailing_digits:
                 if digits.startswith("20") and len(digits) == 4:
