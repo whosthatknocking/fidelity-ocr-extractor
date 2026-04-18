@@ -2384,7 +2384,10 @@ def repair_percent_change_from_price_fields(record: dict[str, str]) -> dict[str,
     if previous_close <= 0:
         return repaired
     implied = (change / previous_close) * 100.0
-    sign_conflict = sign_of(repaired.get("change")) != 0 and sign_of(repaired.get("change")) != sign_of(repaired.get("percent_change"))
+    sign_conflict = (
+        sign_of(repaired.get("change")) != 0
+        and sign_of(repaired.get("change")) != sign_of(repaired.get("percent_change"))
+    )
     if sign_conflict or percent_change is None or abs(percent_change - implied) > max(1.0, abs(implied) * 3.0):
         repaired["percent_change"] = f"{implied:+.2f}%"
     return repaired
