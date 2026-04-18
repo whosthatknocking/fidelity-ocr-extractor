@@ -2703,7 +2703,7 @@ def repair_record_from_crop_texts(
             and repaired.get(field_name)
             and field_name != "quantity"
             and not field_needs_retry(
-            field_name, repaired.get(field_name, "")
+                field_name, repaired.get(field_name, "")
             )
         ):
             continue
