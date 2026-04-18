@@ -1519,7 +1519,7 @@ def score_symbol_candidate(tokens: list[str], index: int) -> int:
         if len(candidate) >= 3:
             trailing_words += 1
     score += trailing_words * 3
-    if any(candidate in {"CALL", "PUT"} for candidate in tokens[index + 1 : index + 8]):
+    if any(candidate in {"CALL", "PUT"} for candidate in tokens[index + 1: index + 8]):
         score += 5
     return score
 
