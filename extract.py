@@ -2294,7 +2294,11 @@ def tesseract_row_stream_fields(
     if sequential_change:
         parsed_change = parsed.get("change", "")
         parsed_last = parsed.get("last", "")
-        sign_conflict = sign_of(parsed_change) and sign_of(parsed.get("percent_change")) and sign_of(parsed_change) != sign_of(parsed.get("percent_change"))
+        sign_conflict = (
+            sign_of(parsed_change)
+            and sign_of(parsed.get("percent_change"))
+            and sign_of(parsed_change) != sign_of(parsed.get("percent_change"))
+        )
         duplicate_last = parsed_change and parsed_last and normalize_number(parsed_change) == normalize_number(parsed_last)
         if not parsed_change or sign_conflict or duplicate_last:
             parsed["change"] = sequential_change
