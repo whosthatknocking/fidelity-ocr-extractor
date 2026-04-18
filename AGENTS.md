@@ -4,7 +4,7 @@ This file gives project-specific guidance to AI agents working in this repositor
 
 ## Project Context
 
-- Project: `fidelity-extractor`
+- Project: `fidelity-ocr-extractor`
 - Purpose: extract the Fidelity Trader+ positions monitoring view from PNG screenshots into CSV files
 - Runtime: Python `3.9+` and macOS Vision OCR via `swift`
 - Main entrypoints:

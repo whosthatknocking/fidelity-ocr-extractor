@@ -1,4 +1,4 @@
-# Fidelity Extractor
+# Fidelity OCR Extractor
 
 This repository is an archived experiment that attempted to extract Fidelity Trader+ positions from the fixed `monitoring` screenshot view and write them as CSV files.
 
@@ -85,7 +85,7 @@ python3 -m pip install -e ".[dev]"
 Console scripts:
 
 ```bash
-fidelity-extractor extractor
+fidelity-ocr-extractor extractor
 ```
 
 ## Current Scope

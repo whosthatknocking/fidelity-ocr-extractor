@@ -51,5 +51,5 @@ python3 -m pip install -e .
 Then use:
 
 ```bash
-fidelity-extractor extractor
+fidelity-ocr-extractor extractor
 ```

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`fidelity-extractor` is an archived prototype that explored converting Fidelity Trader+ positions screenshots from the fixed `monitoring` layout into CSV files.
+`fidelity-ocr-extractor` is an archived prototype that explored converting Fidelity Trader+ positions screenshots from the fixed `monitoring` layout into CSV files.
 
 This spec remains useful as a record of the schema and validation assumptions, but the repository should not be treated as a production-ready extraction system.
 

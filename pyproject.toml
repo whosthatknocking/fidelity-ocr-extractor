@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fidelity-extractor"
+name = "fidelity-ocr-extractor"
 version = "0.1.0"
 description = "Extract Fidelity Trader+ monitoring screenshots into CSV files."
 readme = "README.md"
@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-fidelity-extractor = "main:main"
+fidelity-ocr-extractor = "main:main"
 
 [tool.setuptools]
 py-modules = ["extract", "main"]
