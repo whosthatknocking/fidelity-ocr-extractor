@@ -1298,7 +1298,9 @@ class ExtractorContractTests(unittest.TestCase):
             fixture_dir.mkdir()
             csv_path = fixture_dir / extractor.csv_name(sample_created_at())
             csv_path.write_text(
-                "schema_name,image_file,created_at,symbol,instrument_type,description,expiration,last,change,percent_change,bid,ask,volume,day_range_low,day_range_high,week_52_low,week_52_high,avg_cost,quantity,total_gl,percent_total_gl\n"
+                "schema_name,image_file,created_at,symbol,instrument_type,description,"
+                "expiration,last,change,percent_change,bid,ask,volume,day_range_low,"
+                "day_range_high,week_52_low,week_52_high,avg_cost,quantity,total_gl,percent_total_gl\n"
                 "monitoring,fixture_existing.png,2030-01-02T03:04:05-08:00,FBTC,equity,,,1,1,1,1,1,1,1,1,1,1,1,1,1,1\n",
                 encoding="utf-8",
             )
